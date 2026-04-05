@@ -363,9 +363,9 @@ fn emit_epilogue(
     buf.push_back(make_sse(sse::CONTENT_BLOCK_STOP, &text_stop));
 
     // 2. content_block_stop for each started tool call block.
-    // Sort by OpenAI index for deterministic ordering.
     let mut tool_indices: Vec<usize> = state.tool_calls.keys().copied().collect();
     tool_indices.sort();
+    let has_tool_calls = tool_indices.iter().any(|idx| state.tool_calls[idx].started);
     for idx in tool_indices {
         let acc = &state.tool_calls[&idx];
         if acc.started {
@@ -379,6 +379,13 @@ fn emit_epilogue(
         }
     }
 
+    // Force stop_reason to tool_use if we saw any tool calls
+    let final_stop = if has_tool_calls {
+        stop_reason::TOOL_USE.to_string()
+    } else {
+        state.final_stop_reason.clone()
+    };
+
     // 3. message_delta with stop_reason and usage.
     let usage_data = json!({
         "input_tokens": state.usage.input_tokens,
@@ -388,7 +395,7 @@ fn emit_epilogue(
     let message_delta = json!({
         "type": sse::MESSAGE_DELTA,
         "delta": {
-            "stop_reason": state.final_stop_reason,
+            "stop_reason": final_stop,
             "stop_sequence": null
         },
         "usage": usage_data

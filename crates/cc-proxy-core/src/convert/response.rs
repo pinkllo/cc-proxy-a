@@ -37,12 +37,21 @@ pub fn openai_to_claude(response: &ChatCompletionResponse, original_model: &str)
     }
 
     // Map finish reason
+    let has_tool_calls = message
+        .and_then(|m| m.tool_calls.as_ref())
+        .map_or(false, |tc| !tc.is_empty());
+
     let finish_reason = choice.and_then(|c| c.finish_reason.as_deref()).unwrap_or("stop");
-    let stop_reason = match finish_reason {
-        "stop" => claude::stop_reason::END_TURN,
-        "length" => claude::stop_reason::MAX_TOKENS,
-        "tool_calls" | "function_call" => claude::stop_reason::TOOL_USE,
-        _ => claude::stop_reason::END_TURN,
+    let stop_reason = if has_tool_calls {
+        // Force tool_use if response contains tool calls, regardless of finish_reason
+        claude::stop_reason::TOOL_USE
+    } else {
+        match finish_reason {
+            "stop" => claude::stop_reason::END_TURN,
+            "length" => claude::stop_reason::MAX_TOKENS,
+            "tool_calls" | "function_call" => claude::stop_reason::TOOL_USE,
+            _ => claude::stop_reason::END_TURN,
+        }
     };
 
     let usage = response.usage.as_ref().map(|u| Usage {
