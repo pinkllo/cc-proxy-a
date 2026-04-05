@@ -23,21 +23,25 @@ jobs:
             target_name: linux-x86_64
             binary_name: cc-proxy
             asset_name: cc-proxy-linux-x86_64
+            rust_target: ""
 
-          - os: macos-13
+          - os: macos-latest
             target_name: darwin-x86_64
             binary_name: cc-proxy
             asset_name: cc-proxy-darwin-x86_64
+            rust_target: x86_64-apple-darwin
 
           - os: macos-latest
             target_name: darwin-arm64
             binary_name: cc-proxy
             asset_name: cc-proxy-darwin-arm64
+            rust_target: ""
 
           - os: windows-latest
             target_name: windows-x86_64
             binary_name: cc-proxy.exe
             asset_name: cc-proxy-windows-x86_64.exe
+            rust_target: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -56,13 +60,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-release-
 
+      - name: Add cross-compile target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
       - name: Build release binary
-        run: cargo build --release
+        run: |
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            cargo build --release --target ${{ matrix.rust_target }}
+          else
+            cargo build --release
+          fi
+        shell: bash
 
       - name: Rename binary
         shell: bash
         run: |
-          cp "target/release/${{ matrix.binary_name }}" "${{ matrix.asset_name }}"
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            cp "target/${{ matrix.rust_target }}/release/${{ matrix.binary_name }}" "${{ matrix.asset_name }}"
+          else
+            cp "target/release/${{ matrix.binary_name }}" "${{ matrix.asset_name }}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
