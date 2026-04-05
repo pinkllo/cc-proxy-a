@@ -53,10 +53,9 @@ struct ToolCallAccumulator {
     id: Option<String>,
     /// Function name.
     name: Option<String>,
-    /// Accumulated raw JSON argument fragments.
+    /// Accumulated raw JSON argument fragments (for debugging/logging only).
+    #[allow(dead_code)]
     args_buffer: String,
-    /// Whether we already emitted the complete JSON delta.
-    json_sent: bool,
     /// The Claude content-block index assigned to this tool call.
     claude_index: Option<usize>,
     /// Whether we already emitted `content_block_start` for this tool call.
@@ -69,7 +68,6 @@ impl ToolCallAccumulator {
             id: None,
             name: None,
             args_buffer: String::new(),
-            json_sent: false,
             claude_index: None,
             started: false,
         }
@@ -317,31 +315,25 @@ fn process_chunk(
                     buf.push_back(make_sse(sse::CONTENT_BLOCK_START, &data));
                 }
 
-                // Accumulate function arguments and try to emit input_json_delta.
+                // Accumulate function arguments and emit input_json_delta incrementally.
                 if let Some(ref func) = tc_delta.function {
                     if let Some(ref args_fragment) = func.arguments {
-                        if acc.started {
+                        if acc.started && !args_fragment.is_empty() {
                             acc.args_buffer.push_str(args_fragment);
 
-                            // Try parsing — emit the full buffer as partial_json once valid.
-                            if !acc.json_sent {
-                                if serde_json::from_str::<serde_json::Value>(&acc.args_buffer)
-                                    .is_ok()
-                                {
-                                    let data = json!({
-                                        "type": sse::CONTENT_BLOCK_DELTA,
-                                        "index": acc.claude_index.unwrap(),
-                                        "delta": {
-                                            "type": sse::DELTA_INPUT_JSON,
-                                            "partial_json": acc.args_buffer
-                                        }
-                                    });
-                                    buf.push_back(
-                                        make_sse(sse::CONTENT_BLOCK_DELTA, &data),
-                                    );
-                                    acc.json_sent = true;
+                            // Emit each fragment as partial_json immediately.
+                            // Claude Code expects incremental deltas, not buffered-until-valid.
+                            let data = json!({
+                                "type": sse::CONTENT_BLOCK_DELTA,
+                                "index": acc.claude_index.unwrap(),
+                                "delta": {
+                                    "type": sse::DELTA_INPUT_JSON,
+                                    "partial_json": args_fragment
                                 }
-                            }
+                            });
+                            buf.push_back(
+                                make_sse(sse::CONTENT_BLOCK_DELTA, &data),
+                            );
                         }
                     }
                 }
@@ -584,10 +576,10 @@ mod tests {
 
         let result = collect_events(events, "claude-3-opus-20240229").await;
 
-        // Prologue(3) + content_block_start(tool) + input_json_delta + finish(nothing)
+        // Prologue(3) + content_block_start(tool) + 2 input_json_deltas (one per chunk) + finish(nothing)
         // Epilogue: text_stop + tool_stop + message_delta + message_stop = 4
-        // Total = 3 + 1 (tool block start) + 1 (json delta) + 4 = 9
-        assert_eq!(result.len(), 9, "expected 9 events for tool call stream, got {}", result.len());
+        // Total = 3 + 1 (tool block start) + 2 (json deltas) + 4 = 10
+        assert_eq!(result.len(), 10, "expected 10 events for tool call stream, got {}", result.len());
     }
 
     #[tokio::test]

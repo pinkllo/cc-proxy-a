@@ -121,6 +121,7 @@ async fn count_tokens(
                     }
                 }
             }
+            MessageContent::Null => {}
         }
     }
 

@@ -115,6 +115,12 @@ fn extract_system_text(system: &SystemContent) -> String {
 
 fn convert_user_message(msg: &Message) -> ChatMessage {
     match &msg.content {
+        MessageContent::Null => ChatMessage {
+            role: "user".into(),
+            content: Some(ChatContent::Text(String::new())),
+            tool_calls: None,
+            tool_call_id: None,
+        },
         MessageContent::Text(s) => ChatMessage {
             role: "user".into(),
             content: Some(ChatContent::Text(s.clone())),
@@ -168,6 +174,12 @@ fn convert_user_message(msg: &Message) -> ChatMessage {
 
 fn convert_assistant_message(msg: &Message) -> ChatMessage {
     match &msg.content {
+        MessageContent::Null => ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
         MessageContent::Text(s) => ChatMessage {
             role: "assistant".into(),
             content: Some(ChatContent::Text(s.clone())),
@@ -206,10 +218,11 @@ fn convert_assistant_message(msg: &Message) -> ChatMessage {
 }
 
 fn has_tool_results(content: &MessageContent) -> bool {
-    if let MessageContent::Blocks(blocks) = content {
-        blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-    } else {
-        false
+    match content {
+        MessageContent::Blocks(blocks) => {
+            blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        }
+        _ => false,
     }
 }
 

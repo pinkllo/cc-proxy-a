@@ -49,6 +49,7 @@ pub struct SystemBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
+    #[serde(default)]
     pub content: MessageContent,
 }
 
@@ -57,6 +58,13 @@ pub struct Message {
 pub enum MessageContent {
     Text(String),
     Blocks(Vec<ContentBlock>),
+    Null,
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Null
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
