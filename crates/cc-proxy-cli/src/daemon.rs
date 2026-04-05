@@ -33,14 +33,26 @@ pub fn remove_pid_file() {
     let _ = fs::remove_file(pid_file_path());
 }
 
-/// Check if a process is alive (handles EPERM for processes owned by other users)
+/// Check if a process is alive
 pub fn is_process_alive(pid: u32) -> bool {
-    let pid = pid as libc::pid_t;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
+    #[cfg(unix)]
+    {
+        let pid = pid as libc::pid_t;
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(windows)]
+    {
+        // On Windows, use tasklist to check if PID exists
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
 }
 
 /// Start the proxy in daemon mode by re-executing self

@@ -23,4 +23,5 @@ console.workspace = true
 dirs.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
