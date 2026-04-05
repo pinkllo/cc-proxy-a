@@ -56,3 +56,10 @@ bytes = "1"
 
 # Home directory
 dirs = "5"
+
+# TUI interactive prompts
+dialoguer = "0.11"
+console = "0.15"
+
+# Unix process management
+libc = "0.2"
