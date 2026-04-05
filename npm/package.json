@@ -1,5 +1,5 @@
 {
-  "name": "cc-proxy",
+  "name": "ccproxy-cli",
   "version": "0.1.0",
   "description": "Claude Code Proxy - A high-performance proxy for Claude API, built with Rust",
   "bin": {
