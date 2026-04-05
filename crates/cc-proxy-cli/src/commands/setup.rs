@@ -342,6 +342,9 @@ fn build_config(
         request_timeout: 90,
         custom_headers: HashMap::new(),
         reasoning_effort,
+        big_reasoning: None,
+        middle_reasoning: None,
+        small_reasoning: None,
     }
 }
 

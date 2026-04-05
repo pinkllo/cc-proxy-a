@@ -1,23 +1,50 @@
-use crate::config::ProxyConfig;
+use crate::config::{ModelTier, ProxyConfig};
+
+/// Result of model mapping: the target model name and which tier it matched
+#[derive(Debug, Clone)]
+pub struct MappedModel {
+    pub model: String,
+    pub tier: Option<ModelTier>,
+}
 
 /// Map Claude model names to configured OpenAI-compatible model names.
-/// Only models containing Claude keywords are mapped; everything else passes through.
-pub fn map_model(claude_model: &str, config: &ProxyConfig) -> String {
+/// Returns the mapped model and which tier it matched (for per-tier reasoning).
+pub fn map_model(claude_model: &str, config: &ProxyConfig) -> MappedModel {
     let lower = claude_model.to_lowercase();
 
     if lower.contains("haiku") {
-        config.small_model.clone()
+        MappedModel {
+            model: config.small_model.clone(),
+            tier: Some(ModelTier::Small),
+        }
     } else if lower.contains("sonnet") {
-        config.effective_middle_model().to_string()
+        MappedModel {
+            model: config.effective_middle_model().to_string(),
+            tier: Some(ModelTier::Middle),
+        }
     } else if lower.contains("opus") {
-        config.big_model.clone()
+        MappedModel {
+            model: config.big_model.clone(),
+            tier: Some(ModelTier::Big),
+        }
     } else if lower.starts_with("claude") {
         // Unknown Claude variant — default to big
-        config.big_model.clone()
+        MappedModel {
+            model: config.big_model.clone(),
+            tier: Some(ModelTier::Big),
+        }
     } else {
-        // Non-Claude model — pass through as-is (F12)
-        claude_model.to_string()
+        // Non-Claude model — pass through as-is
+        MappedModel {
+            model: claude_model.to_string(),
+            tier: None,
+        }
     }
+}
+
+/// Legacy helper: just get the model name (for backward compat)
+pub fn map_model_name(claude_model: &str, config: &ProxyConfig) -> String {
+    map_model(claude_model, config).model
 }
 
 #[cfg(test)]
@@ -41,31 +68,56 @@ mod tests {
             request_timeout: 90,
             custom_headers: Default::default(),
             reasoning_effort: "none".into(),
+            big_reasoning: None,
+            middle_reasoning: None,
+            small_reasoning: None,
         }
     }
 
     #[test]
     fn test_haiku_mapping() {
         let cfg = test_config();
-        assert_eq!(map_model("claude-3-5-haiku-20241022", &cfg), "gpt-4o-mini");
+        let m = map_model("claude-3-5-haiku-20241022", &cfg);
+        assert_eq!(m.model, "gpt-4o-mini");
+        assert_eq!(m.tier, Some(ModelTier::Small));
     }
 
     #[test]
     fn test_sonnet_mapping() {
         let cfg = test_config();
-        assert_eq!(map_model("claude-3-5-sonnet-20241022", &cfg), "gpt-4o");
+        let m = map_model("claude-3-5-sonnet-20241022", &cfg);
+        assert_eq!(m.model, "gpt-4o");
+        assert_eq!(m.tier, Some(ModelTier::Middle));
     }
 
     #[test]
     fn test_opus_mapping() {
         let cfg = test_config();
-        assert_eq!(map_model("claude-3-opus-20240229", &cfg), "gpt-4o");
+        let m = map_model("claude-3-opus-20240229", &cfg);
+        assert_eq!(m.model, "gpt-4o");
+        assert_eq!(m.tier, Some(ModelTier::Big));
     }
 
     #[test]
     fn test_passthrough() {
         let cfg = test_config();
-        assert_eq!(map_model("gpt-4o", &cfg), "gpt-4o");
-        assert_eq!(map_model("deepseek-chat", &cfg), "deepseek-chat");
+        let m = map_model("gpt-4o", &cfg);
+        assert_eq!(m.model, "gpt-4o");
+        assert_eq!(m.tier, None);
+    }
+
+    #[test]
+    fn test_per_tier_reasoning() {
+        let mut cfg = test_config();
+        cfg.reasoning_effort = "low".into();
+        cfg.big_reasoning = Some("xhigh".into());
+        cfg.small_reasoning = Some("none".into());
+
+        // Big tier uses its own reasoning
+        assert_eq!(cfg.reasoning_for_tier(ModelTier::Big), "xhigh");
+        // Middle falls back to global
+        assert_eq!(cfg.reasoning_for_tier(ModelTier::Middle), "low");
+        // Small uses its own
+        assert_eq!(cfg.reasoning_for_tier(ModelTier::Small), "none");
     }
 }

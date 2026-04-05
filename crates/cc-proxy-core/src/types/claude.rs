@@ -44,6 +44,10 @@ pub struct SystemBlock {
     pub block_type: String,
     #[serde(default)]
     pub text: Option<String>,
+    /// Anthropic cache_control directive (e.g. `{"type":"ephemeral"}`).
+    /// Accepted on ingest for compatibility; not forwarded to OpenAI backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

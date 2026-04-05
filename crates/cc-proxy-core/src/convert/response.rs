@@ -72,3 +72,260 @@ pub fn openai_to_claude(response: &ChatCompletionResponse, original_model: &str)
         usage,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::openai::*;
+
+    // ---- F22-1: Normal text response ----
+
+    #[test]
+    fn test_normal_text_response() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-abc".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("Hello, how can I help?".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: Some(ResponseUsage {
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                prompt_tokens_details: None,
+            }),
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+
+        assert_eq!(result.id, "chatcmpl-abc");
+        assert_eq!(result.response_type, "message");
+        assert_eq!(result.role, "assistant");
+        assert_eq!(result.model, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            claude::ResponseContentBlock::Text { text } => {
+                assert_eq!(text, "Hello, how can I help?");
+            }
+            _ => panic!("Expected text content block"),
+        }
+
+        assert_eq!(result.usage.input_tokens, 10);
+        assert_eq!(result.usage.output_tokens, 20);
+    }
+
+    // ---- F22-2: Tool call response ----
+
+    #[test]
+    fn test_tool_call_response_stop_reason() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-tool".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_abc123".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "get_weather".into(),
+                            arguments: r#"{"location":"Tokyo"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+
+        // Must be "tool_use" regardless of the OpenAI finish_reason value
+        assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            claude::ResponseContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_abc123");
+                assert_eq!(name, "get_weather");
+                assert_eq!(input["location"], "Tokyo");
+            }
+            _ => panic!("Expected tool_use content block"),
+        }
+    }
+
+    #[test]
+    fn test_tool_call_with_text_and_stop_finish_reason() {
+        // Even if finish_reason is "stop", presence of tool_calls forces "tool_use"
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-mixed".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("Calling tool...".into()),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_xyz".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "search".into(),
+                            arguments: r#"{"q":"rust"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(result.content.len(), 2); // text + tool_use
+    }
+
+    // ---- F22-3: Empty choices array ----
+
+    #[test]
+    fn test_empty_choices() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-empty".into(),
+            choices: vec![],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+
+        // Should produce at least one empty text block as fallback
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            claude::ResponseContentBlock::Text { text } => assert_eq!(text, ""),
+            _ => panic!("Expected empty text fallback block"),
+        }
+        assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    // ---- F22-4: Malformed tool call arguments ----
+
+    #[test]
+    fn test_malformed_tool_arguments_uses_raw_fallback() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-bad".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_bad".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "do_thing".into(),
+                            arguments: "not valid json {{{".into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        match &result.content[0] {
+            claude::ResponseContentBlock::ToolUse { input, .. } => {
+                // Should fall back to {"raw_arguments": "not valid json {{{"}
+                assert_eq!(input["raw_arguments"], "not valid json {{{");
+            }
+            _ => panic!("Expected tool_use block"),
+        }
+    }
+
+    // ---- F22-5: Usage mapping with cache_read_input_tokens ----
+
+    #[test]
+    fn test_usage_with_cache_read_tokens() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-cache".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("cached".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: Some(ResponseUsage {
+                prompt_tokens: 500,
+                completion_tokens: 100,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    cached_tokens: Some(300),
+                }),
+            }),
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.usage.input_tokens, 500);
+        assert_eq!(result.usage.output_tokens, 100);
+        assert_eq!(result.usage.cache_read_input_tokens, Some(300));
+    }
+
+    #[test]
+    fn test_usage_without_cache_details() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-nocache".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("no cache".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: Some(ResponseUsage {
+                prompt_tokens: 50,
+                completion_tokens: 25,
+                prompt_tokens_details: None,
+            }),
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.usage.input_tokens, 50);
+        assert_eq!(result.usage.output_tokens, 25);
+        assert!(result.usage.cache_read_input_tokens.is_none());
+    }
+
+    #[test]
+    fn test_usage_missing_defaults_to_zero() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-nousage".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("hi".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.usage.input_tokens, 0);
+        assert_eq!(result.usage.output_tokens, 0);
+    }
+
+    // ---- Finish reason mapping ----
+
+    #[test]
+    fn test_finish_reason_length_maps_to_max_tokens() {
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-len".into(),
+            choices: vec![Choice {
+                message: ChoiceMessage {
+                    content: Some("truncated...".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("length".into()),
+            }],
+            usage: None,
+        };
+
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        assert_eq!(result.stop_reason.as_deref(), Some("max_tokens"));
+    }
+}

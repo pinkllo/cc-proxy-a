@@ -4,6 +4,14 @@ use std::path::PathBuf;
 
 use crate::error::ProxyError;
 
+/// Which model tier was matched during model mapping
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    Big,
+    Middle,
+    Small,
+}
+
 /// Proxy configuration — loaded from env vars, .env file, or config.json
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -34,9 +42,16 @@ pub struct ProxyConfig {
     pub request_timeout: u64,
     #[serde(default)]
     pub custom_headers: HashMap<String, String>,
-    /// Reasoning effort level for thinking models (none/low/medium/high/xhigh)
+    /// Global reasoning effort fallback (none/low/medium/high/xhigh)
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+    /// Per-tier reasoning effort (overrides global)
+    #[serde(default)]
+    pub big_reasoning: Option<String>,
+    #[serde(default)]
+    pub middle_reasoning: Option<String>,
+    #[serde(default)]
+    pub small_reasoning: Option<String>,
 }
 
 // Manual Debug impl to redact secrets (F14)
@@ -72,6 +87,17 @@ impl ProxyConfig {
     /// Effective middle model (falls back to big_model)
     pub fn effective_middle_model(&self) -> &str {
         self.middle_model.as_deref().unwrap_or(&self.big_model)
+    }
+
+    /// Get reasoning effort for a specific model tier.
+    /// Priority: per-tier > global > "none"
+    pub fn reasoning_for_tier(&self, tier: ModelTier) -> &str {
+        let per_tier = match tier {
+            ModelTier::Big => self.big_reasoning.as_deref(),
+            ModelTier::Middle => self.middle_reasoning.as_deref(),
+            ModelTier::Small => self.small_reasoning.as_deref(),
+        };
+        per_tier.unwrap_or(&self.reasoning_effort)
     }
 
     /// Load config: env vars > .env > config.json > defaults
@@ -111,6 +137,9 @@ impl ProxyConfig {
                 .parse().unwrap_or(default_timeout()),
             custom_headers,
             reasoning_effort: env_or("REASONING_EFFORT", &default_reasoning_effort()),
+            big_reasoning: std::env::var("BIG_REASONING").ok().filter(|s| !s.is_empty()),
+            middle_reasoning: std::env::var("MIDDLE_REASONING").ok().filter(|s| !s.is_empty()),
+            small_reasoning: std::env::var("SMALL_REASONING").ok().filter(|s| !s.is_empty()),
         })
     }
 
