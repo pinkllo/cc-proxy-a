@@ -1,18 +1,21 @@
 use axum::{
-    extract::{Json, State},
+    extract::{DefaultBodyLimit, Json, State},
+    http::Method,
+    middleware,
     response::{sse::Sse, IntoResponse},
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::auth;
 use crate::client::UpstreamClient;
 use crate::config::ProxyConfig;
 use crate::convert;
 use crate::error::ProxyError;
-use crate::types::claude::{MessagesRequest, TokenCountRequest, MessageContent, SystemContent};
+use crate::types::claude::{MessageContent, MessagesRequest, SystemContent, TokenCountRequest};
 
 /// Shared application state
 #[derive(Clone)]
@@ -23,13 +26,36 @@ pub struct AppState {
 
 /// Create the axum router
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    let auth_key = state.config.anthropic_api_key.clone();
+
+    // Authenticated routes (Claude API endpoints)
+    let api_routes = Router::new()
         .route("/v1/messages", post(create_message))
         .route("/v1/messages/count_tokens", post(count_tokens))
+        .layer(middleware::from_fn(auth::auth_middleware))
+        .layer(Extension(auth_key));
+
+    // Public routes (health, info)
+    let public_routes = Router::new()
         .route("/health", get(health))
         .route("/test-connection", get(test_connection))
-        .route("/", get(root))
-        .layer(CorsLayer::permissive())
+        .route("/", get(root));
+
+    // CORS: localhost only (F09)
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let bytes = origin.as_bytes();
+            bytes.starts_with(b"http://localhost")
+                || bytes.starts_with(b"http://127.0.0.1")
+                || bytes.starts_with(b"http://[::1]")
+        }))
+        .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
+        .allow_headers(tower_http::cors::Any);
+
+    api_routes
+        .merge(public_routes)
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB (F20)
         .with_state(Arc::new(state))
 }
 
@@ -51,7 +77,14 @@ pub async fn serve(config: ProxyConfig) -> Result<(), ProxyError> {
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to bind {addr}: {e}")))?;
 
+    // Graceful shutdown on SIGTERM/SIGINT (F32)
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Shutdown signal received, draining connections...");
+    };
+
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| ProxyError::Internal(format!("Server error: {e}")))?;
 
@@ -75,7 +108,8 @@ async fn create_message(
             .chat_completion_stream(&openai_request, &state.config.openai_api_key)
             .await?;
 
-        let claude_stream = convert::stream::openai_stream_to_claude(event_stream, request.model.clone());
+        let claude_stream =
+            convert::stream::openai_stream_to_claude(event_stream, request.model.clone());
 
         Ok(Sse::new(claude_stream)
             .keep_alive(axum::response::sse::KeepAlive::default())
@@ -87,15 +121,14 @@ async fn create_message(
             .chat_completion(&openai_request, &state.config.openai_api_key)
             .await?;
 
-        let claude_response = convert::response::openai_to_claude(&openai_response, &request.model);
+        let claude_response =
+            convert::response::openai_to_claude(&openai_response, &request.model);
 
         Ok(Json(claude_response).into_response())
     }
 }
 
-async fn count_tokens(
-    Json(request): Json<TokenCountRequest>,
-) -> Json<serde_json::Value> {
+async fn count_tokens(Json(request): Json<TokenCountRequest>) -> Json<serde_json::Value> {
     let mut total_chars: usize = 0;
 
     if let Some(ref system) = request.system {
@@ -157,17 +190,23 @@ async fn test_connection(State(state): State<Arc<AppState>>) -> impl IntoRespons
         stream_options: None,
     };
 
-    match state.client.chat_completion(&test_req, &state.config.openai_api_key).await {
+    match state
+        .client
+        .chat_completion(&test_req, &state.config.openai_api_key)
+        .await
+    {
         Ok(resp) => Json(serde_json::json!({
             "status": "success",
             "message": "Connected to upstream API",
             "model_used": state.config.small_model,
             "response_id": resp.id,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => Json(serde_json::json!({
             "status": "failed",
             "error": e.to_string(),
-        })).into_response(),
+        }))
+        .into_response(),
     }
 }
 
@@ -191,7 +230,6 @@ async fn root(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 }
 
 fn chrono_now() -> String {
-    // Simple timestamp without pulling in chrono crate
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

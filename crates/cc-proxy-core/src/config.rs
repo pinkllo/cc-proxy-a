@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::error::ProxyError;
 
 /// Proxy configuration — loaded from env vars, .env file, or config.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     pub openai_api_key: String,
     #[serde(default = "default_base_url")]
@@ -34,6 +34,23 @@ pub struct ProxyConfig {
     pub request_timeout: u64,
     #[serde(default)]
     pub custom_headers: HashMap<String, String>,
+}
+
+// Manual Debug impl to redact secrets (F14)
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("openai_api_key", &"[REDACTED]")
+            .field("openai_base_url", &self.openai_base_url)
+            .field("big_model", &self.big_model)
+            .field("middle_model", &self.middle_model)
+            .field("small_model", &self.small_model)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("anthropic_api_key", &self.anthropic_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("log_level", &self.log_level)
+            .finish()
+    }
 }
 
 fn default_base_url() -> String { "https://api.openai.com/v1".into() }
@@ -99,16 +116,28 @@ impl ProxyConfig {
             .map_err(|e| ProxyError::Config(format!("Invalid config JSON: {e}")))
     }
 
-    /// Save to JSON config file
+    /// Save to JSON config file (with restrictive permissions on Unix)
     pub fn save_to_file(&self, path: &PathBuf) -> Result<(), ProxyError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ProxyError::Config(format!("Failed to create config dir: {e}")))?;
+            // Set directory to owner-only (F02)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| ProxyError::Config(format!("Failed to serialize config: {e}")))?;
-        std::fs::write(path, content)
+        std::fs::write(path, &content)
             .map_err(|e| ProxyError::Config(format!("Failed to write config: {e}")))?;
+        // Set file to owner-only read/write (F02)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 
@@ -117,14 +146,19 @@ impl ProxyConfig {
         dirs_or_home().join(".cc-proxy").join("config.json")
     }
 
-    /// Extract CUSTOM_HEADER_* env vars
+    /// Extract CUSTOM_HEADER_* env vars (blocklist sensitive headers)
     fn load_custom_headers() -> HashMap<String, String> {
+        const BLOCKED: &[&str] = &[
+            "host", "authorization", "content-type", "content-length",
+            "transfer-encoding", "connection",
+        ];
         std::env::vars()
             .filter(|(k, _)| k.starts_with("CUSTOM_HEADER_"))
             .map(|(k, v)| {
-                let header_name = k[14..].replace('_', "-");
+                let header_name = k[14..].replace('_', "-").to_lowercase();
                 (header_name, v)
             })
+            .filter(|(name, _)| !BLOCKED.contains(&name.as_str()))
             .collect()
     }
 }

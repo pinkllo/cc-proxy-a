@@ -264,7 +264,8 @@ fn convert_tool_results(msg: &Message) -> Vec<ChatMessage> {
 fn convert_tool_choice(choice: &serde_json::Value) -> serde_json::Value {
     let choice_type = choice.get("type").and_then(|v| v.as_str()).unwrap_or("auto");
     match choice_type {
-        "auto" | "any" => serde_json::json!("auto"),
+        "auto" => serde_json::json!("auto"),
+        "any" => serde_json::json!("required"),
         "tool" => {
             if let Some(name) = choice.get("name").and_then(|v| v.as_str()) {
                 serde_json::json!({

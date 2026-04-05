@@ -104,20 +104,27 @@ impl UpstreamClient {
 fn parse_sse_stream(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl Stream<Item = Result<OpenAiSseEvent, StreamError>> + Send {
-    // We accumulate partial lines across chunk boundaries
+    // Accumulate raw bytes to avoid UTF-8 boundary corruption (F17)
     let line_stream = async_stream::stream! {
-        let mut buffer = String::new();
+        let mut raw_buffer = Vec::<u8>::new();
 
         tokio::pin!(byte_stream);
         while let Some(chunk_result) = byte_stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    raw_buffer.extend_from_slice(&bytes);
 
-                    // Process complete lines
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].trim_end_matches('\r').to_string();
-                        buffer = buffer[pos + 1..].to_string();
+                    // Process complete lines (delimited by \n)
+                    while let Some(pos) = raw_buffer.iter().position(|&b| b == b'\n') {
+                        let mut line_bytes = raw_buffer[..pos].to_vec();
+                        raw_buffer = raw_buffer[pos + 1..].to_vec();
+
+                        // Trim \r
+                        if line_bytes.last() == Some(&b'\r') {
+                            line_bytes.pop();
+                        }
+
+                        let line = String::from_utf8_lossy(&line_bytes).to_string();
 
                         if line.is_empty() {
                             continue;

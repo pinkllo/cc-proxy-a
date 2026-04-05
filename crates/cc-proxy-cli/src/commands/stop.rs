@@ -1,35 +1,10 @@
-use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 
-/// PID 文件路径: ~/.cc-proxy/proxy.pid
-fn pid_file_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".cc-proxy")
-        .join("proxy.pid")
-}
-
-/// 从 PID 文件读取进程 ID
-fn read_pid_from_file() -> Option<u32> {
-    let path = pid_file_path();
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-}
-
-/// 检查进程是否存活 (kill -0)
-fn is_process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+use crate::daemon::{is_process_alive, read_pid, remove_pid_file};
 
 /// 向进程发送信号
 fn send_signal(pid: u32, signal: &str) -> bool {
@@ -61,14 +36,6 @@ fn find_pid_by_port(port: u16) -> Option<u32> {
         .and_then(|line| line.trim().parse::<u32>().ok())
 }
 
-/// 清理 PID 文件
-fn cleanup_pid_file() {
-    let path = pid_file_path();
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-    }
-}
-
 /// 加载配置中的端口号（用于端口查找兜底）
 fn load_configured_port() -> u16 {
     let config_path = cc_proxy_core::config::ProxyConfig::default_config_path();
@@ -83,14 +50,14 @@ fn load_configured_port() -> u16 {
 
 pub fn run() -> Result<()> {
     // 1. 从 PID 文件获取进程 ID
-    let pid = match read_pid_from_file() {
+    let pid = match read_pid() {
         Some(pid) => {
             if is_process_alive(pid) {
                 println!("找到运行中的 cc-proxy 进程 (PID: {pid})");
                 pid
             } else {
                 println!("PID 文件存在但进程 {pid} 已不存在，清理残留文件...");
-                cleanup_pid_file();
+                remove_pid_file();
                 // 兜底：尝试通过端口查找
                 let port = load_configured_port();
                 match find_pid_by_port(port) {
@@ -133,7 +100,7 @@ pub fn run() -> Result<()> {
     loop {
         if !is_process_alive(pid) {
             println!("cc-proxy 已优雅停止。");
-            cleanup_pid_file();
+            remove_pid_file();
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -155,7 +122,7 @@ pub fn run() -> Result<()> {
     }
 
     println!("cc-proxy 已强制终止。");
-    cleanup_pid_file();
+    remove_pid_file();
 
     Ok(())
 }

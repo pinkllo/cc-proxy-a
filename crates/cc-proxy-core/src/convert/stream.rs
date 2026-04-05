@@ -165,8 +165,8 @@ pub fn openai_stream_to_claude(
                             Some(Err(e)) => {
                                 error!("upstream stream error: {e}");
                                 emit_error_event(&e.to_string(), &mut buf);
-                                // After error, skip to Done (no epilogue — stream is broken).
-                                state.phase = Phase::Done;
+                                // Still emit epilogue so client gets proper stream termination (F16)
+                                state.phase = Phase::Epilogue;
                             }
                             None => {
                                 // Stream ended without [DONE]. Treat as normal completion.
@@ -598,9 +598,9 @@ mod tests {
 
         let result = collect_events(events, "test-model").await;
 
-        // Prologue(3) + text_delta(1) + error(1) = 5
-        // No epilogue after error.
-        assert_eq!(result.len(), 5, "expected 5 events with error, got {}", result.len());
+        // Prologue(3) + text_delta(1) + error(1) + Epilogue(3) = 8
+        // Epilogue still emitted after error for proper stream termination.
+        assert_eq!(result.len(), 8, "expected 8 events with error, got {}", result.len());
     }
 
     #[tokio::test]

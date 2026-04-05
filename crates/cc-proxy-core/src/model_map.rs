@@ -1,23 +1,22 @@
 use crate::config::ProxyConfig;
 
-/// Map Claude model names to configured OpenAI-compatible model names
+/// Map Claude model names to configured OpenAI-compatible model names.
+/// Only models containing Claude keywords are mapped; everything else passes through.
 pub fn map_model(claude_model: &str, config: &ProxyConfig) -> String {
-    // Already an OpenAI/provider model — pass through
-    let prefixes = ["gpt-", "o1-", "o3-", "ep-", "doubao-", "deepseek-"];
-    if prefixes.iter().any(|p| claude_model.starts_with(p)) {
-        return claude_model.to_string();
-    }
-
     let lower = claude_model.to_lowercase();
+
     if lower.contains("haiku") {
         config.small_model.clone()
     } else if lower.contains("sonnet") {
         config.effective_middle_model().to_string()
     } else if lower.contains("opus") {
         config.big_model.clone()
-    } else {
-        // Unknown model — default to big
+    } else if lower.starts_with("claude") {
+        // Unknown Claude variant — default to big
         config.big_model.clone()
+    } else {
+        // Non-Claude model — pass through as-is (F12)
+        claude_model.to_string()
     }
 }
 

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use cc_proxy_core::config::ProxyConfig;
 
+use crate::daemon::read_pid;
+
 /// 加载配置：优先 config.json，其次 env/.env
 fn load_config() -> Result<ProxyConfig> {
     let config_path = ProxyConfig::default_config_path();
@@ -25,18 +27,6 @@ async fn check_health(port: u16) -> Option<serde_json::Value> {
         return None;
     }
     resp.json::<serde_json::Value>().await.ok()
-}
-
-/// 读取 PID 文件
-fn read_pid() -> Option<u32> {
-    let pid_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".cc-proxy")
-        .join("proxy.pid");
-
-    std::fs::read_to_string(pid_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 /// 获取进程启动时间（macOS/Linux）

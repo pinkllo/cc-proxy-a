@@ -21,7 +21,6 @@ pub fn write_pid(pid: u32) -> anyhow::Result<()> {
 }
 
 /// Read PID from file
-#[allow(dead_code)]
 pub fn read_pid() -> Option<u32> {
     let path = pid_file_path();
     fs::read_to_string(&path)
@@ -30,28 +29,38 @@ pub fn read_pid() -> Option<u32> {
 }
 
 /// Remove PID file
-#[allow(dead_code)]
 pub fn remove_pid_file() {
     let _ = fs::remove_file(pid_file_path());
 }
 
-/// Check if a process is alive
-#[allow(dead_code)]
+/// Check if a process is alive (handles EPERM for processes owned by other users)
 pub fn is_process_alive(pid: u32) -> bool {
-    // Use kill -0 to check if process exists
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    let pid = pid as libc::pid_t;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Start the proxy in daemon mode by re-executing self
 pub fn start_daemon() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
 
-    // Collect all relevant env vars
+    // Log to file instead of /dev/null
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".cc-proxy");
+    fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join("proxy.log");
+    let log_file = fs::File::create(&log_path)?;
+    let err_file = log_file.try_clone()?;
+
     let child = Command::new(exe)
         .arg("start")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(log_file)
+        .stderr(err_file)
         .spawn()?;
 
     let pid = child.id();
@@ -59,6 +68,7 @@ pub fn start_daemon() -> anyhow::Result<()> {
 
     println!("🚀 cc-proxy 已在后台启动 (PID: {pid})");
     println!("   PID 文件: {}", pid_file_path().display());
+    println!("   日志文件: {}", log_path.display());
     println!();
     println!("   停止: cc-proxy stop");
     println!("   状态: cc-proxy status");
