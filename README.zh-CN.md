@@ -383,6 +383,10 @@ cc-proxy 是用 Rust 重写的版本，相比 Node.js/Python 实现：
 - 可选的客户端鉴权（`ANTHROPIC_API_KEY`）
 - 安全敏感的 header 被屏蔽，不可通过自定义头覆盖
 
+## 社区
+
+本项目在 [LINUX DO](https://linux.do/) 社区分享。
+
 ## License
 
 [MIT](LICENSE)

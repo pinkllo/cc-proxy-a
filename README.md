@@ -280,6 +280,10 @@ cc-proxy/
 - Optional client authentication via `ANTHROPIC_API_KEY`
 - Blocked security-sensitive custom headers
 
+## Community
+
+This project is shared with the [LINUX DO](https://linux.do/) community.
+
 ## License
 
 [MIT](LICENSE)
