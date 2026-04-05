@@ -133,25 +133,13 @@ pub async fn run() -> Result<()> {
         .interact_text()
         .context("输入端口失败")?;
 
-    let want_auth = Confirm::new()
-        .with_prompt("  是否启用 API Key 鉴权 (防止他人使用你的代理)")
-        .default(false)
-        .interact()
-        .context("确认鉴权失败")?;
-
-    let anthropic_key = if want_auth {
-        let key = Password::new()
-            .with_prompt("  设置鉴权密钥")
-            .interact()
-            .context("输入鉴权密钥失败")?;
-        if key.trim().is_empty() {
-            None
-        } else {
-            Some(key)
-        }
-    } else {
-        None
-    };
+    // Auto-generate auth key (no user input needed)
+    let anthropic_key = generate_auth_key();
+    println!(
+        "  {} 已自动生成鉴权密钥: {}",
+        style("🔑").cyan(),
+        style(&anthropic_key).green()
+    );
 
     // Build config
     let middle_opt = if middle_model == big_model {
@@ -168,7 +156,7 @@ pub async fn run() -> Result<()> {
         small_model,
         host: "0.0.0.0".to_string(),
         port,
-        anthropic_api_key: anthropic_key,
+        anthropic_api_key: Some(anthropic_key),
         azure_api_version,
         log_level: "info".to_string(),
         max_tokens_limit: 4096,
@@ -480,19 +468,28 @@ fn print_summary(config: &ProxyConfig, path: &std::path::Path) {
         config.host,
         style(config.port).white()
     );
-    println!(
-        "  {} {}",
-        style("Auth:  ").dim(),
-        if config.anthropic_api_key.is_some() {
-            style("已启用").green().to_string()
-        } else {
-            style("未启用").dim().to_string()
-        }
-    );
+    println!();
+    if let Some(ref key) = config.anthropic_api_key {
+        println!(
+            "  {} {}",
+            style("Auth:  ").dim(),
+            style(format!("已启用 (密钥: {})", key)).green()
+        );
+    }
     println!();
     println!(
         "  {} {}",
         style("✔").green().bold(),
         style(format!("配置已保存: {}", path.display())).dim()
     );
+}
+
+/// Generate a random auth key (hex string)
+fn generate_auth_key() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:032x}", ts)
 }
