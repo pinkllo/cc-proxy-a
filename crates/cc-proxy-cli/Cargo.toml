@@ -1,0 +1,20 @@
+[package]
+name = "cc-proxy-cli"
+description = "CLI tool for cc-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cc-proxy"
+path = "src/main.rs"
+
+[dependencies]
+cc-proxy-core = { path = "../cc-proxy-core" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+dotenvy.workspace = true

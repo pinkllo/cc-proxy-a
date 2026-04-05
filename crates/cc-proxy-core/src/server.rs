@@ -1,0 +1,199 @@
+use axum::{
+    extract::{Json, State},
+    response::{sse::Sse, IntoResponse},
+    routing::{get, post},
+    Router,
+};
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
+
+use crate::client::UpstreamClient;
+use crate::config::ProxyConfig;
+use crate::convert;
+use crate::error::ProxyError;
+use crate::types::claude::{MessagesRequest, TokenCountRequest, MessageContent, SystemContent};
+
+/// Shared application state
+#[derive(Clone)]
+pub struct AppState {
+    pub config: ProxyConfig,
+    pub client: UpstreamClient,
+}
+
+/// Create the axum router
+pub fn create_router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/messages", post(create_message))
+        .route("/v1/messages/count_tokens", post(count_tokens))
+        .route("/health", get(health))
+        .route("/test-connection", get(test_connection))
+        .route("/", get(root))
+        .layer(CorsLayer::permissive())
+        .with_state(Arc::new(state))
+}
+
+/// Start the proxy server
+pub async fn serve(config: ProxyConfig) -> Result<(), ProxyError> {
+    let client = UpstreamClient::new(&config)?;
+    let addr = format!("{}:{}", config.host, config.port);
+
+    let state = AppState {
+        config: config.clone(),
+        client,
+    };
+
+    let app = create_router(state);
+
+    tracing::info!("Proxy listening on {addr}");
+
+    let listener = TcpListener::bind(&addr)
+        .await
+        .map_err(|e| ProxyError::Internal(format!("Failed to bind {addr}: {e}")))?;
+
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| ProxyError::Internal(format!("Server error: {e}")))?;
+
+    Ok(())
+}
+
+// ===== Handlers =====
+
+async fn create_message(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MessagesRequest>,
+) -> Result<impl IntoResponse, ProxyError> {
+    tracing::debug!(model = %request.model, stream = ?request.stream, "Processing request");
+
+    let openai_request = convert::request::claude_to_openai(&request, &state.config);
+
+    if request.stream.unwrap_or(false) {
+        // Streaming response
+        let event_stream = state
+            .client
+            .chat_completion_stream(&openai_request, &state.config.openai_api_key)
+            .await?;
+
+        let claude_stream = convert::stream::openai_stream_to_claude(event_stream, request.model.clone());
+
+        Ok(Sse::new(claude_stream)
+            .keep_alive(axum::response::sse::KeepAlive::default())
+            .into_response())
+    } else {
+        // Non-streaming response
+        let openai_response = state
+            .client
+            .chat_completion(&openai_request, &state.config.openai_api_key)
+            .await?;
+
+        let claude_response = convert::response::openai_to_claude(&openai_response, &request.model);
+
+        Ok(Json(claude_response).into_response())
+    }
+}
+
+async fn count_tokens(
+    Json(request): Json<TokenCountRequest>,
+) -> Json<serde_json::Value> {
+    let mut total_chars: usize = 0;
+
+    if let Some(ref system) = request.system {
+        match system {
+            SystemContent::Text(s) => total_chars += s.len(),
+            SystemContent::Blocks(blocks) => {
+                for b in blocks {
+                    if let Some(ref text) = b.text {
+                        total_chars += text.len();
+                    }
+                }
+            }
+        }
+    }
+
+    for msg in &request.messages {
+        match &msg.content {
+            MessageContent::Text(s) => total_chars += s.len(),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let crate::types::claude::ContentBlock::Text { text } = block {
+                        total_chars += text.len();
+                    }
+                }
+            }
+        }
+    }
+
+    let estimated_tokens = (total_chars / 4).max(1);
+    Json(serde_json::json!({ "input_tokens": estimated_tokens }))
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "healthy",
+        "timestamp": chrono_now(),
+        "openai_api_configured": !state.config.openai_api_key.is_empty(),
+        "client_api_key_validation": state.config.anthropic_api_key.is_some(),
+    }))
+}
+
+async fn test_connection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let test_req = crate::types::openai::ChatCompletionRequest {
+        model: state.config.small_model.clone(),
+        messages: vec![crate::types::openai::ChatMessage {
+            role: "user".into(),
+            content: Some(crate::types::openai::ChatContent::Text("Hello".into())),
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: 5,
+        temperature: Some(0.0),
+        top_p: None,
+        stream: false,
+        stop: None,
+        tools: None,
+        tool_choice: None,
+        stream_options: None,
+    };
+
+    match state.client.chat_completion(&test_req, &state.config.openai_api_key).await {
+        Ok(resp) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Connected to upstream API",
+            "model_used": state.config.small_model,
+            "response_id": resp.id,
+        })).into_response(),
+        Err(e) => Json(serde_json::json!({
+            "status": "failed",
+            "error": e.to_string(),
+        })).into_response(),
+    }
+}
+
+async fn root(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "message": "cc-proxy v0.1.0",
+        "status": "running",
+        "config": {
+            "openai_base_url": state.config.openai_base_url,
+            "big_model": state.config.big_model,
+            "middle_model": state.config.effective_middle_model(),
+            "small_model": state.config.small_model,
+        },
+        "endpoints": {
+            "messages": "/v1/messages",
+            "count_tokens": "/v1/messages/count_tokens",
+            "health": "/health",
+            "test_connection": "/test-connection",
+        }
+    }))
+}
+
+fn chrono_now() -> String {
+    // Simple timestamp without pulling in chrono crate
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{now}")
+}
