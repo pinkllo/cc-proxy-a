@@ -6,7 +6,7 @@ use futures::stream::{Stream, StreamExt};
 use crate::config::ProxyConfig;
 use crate::convert::stream::{OpenAiSseEvent, StreamError};
 use crate::error::ProxyError;
-use crate::types::openai::{ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk};
+use crate::types::openai::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 
 /// HTTP client for upstream OpenAI-compatible API
 #[derive(Clone)]

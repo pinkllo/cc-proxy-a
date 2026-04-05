@@ -11,8 +11,22 @@ pub async fn run() -> Result<()> {
     println!("   Middle Model: {}", config.effective_middle_model());
     println!("   Small Model:  {}", config.small_model);
     println!("   Server:       {}:{}", config.host, config.port);
-    println!("   Auth:         {}", if config.anthropic_api_key.is_some() { "enabled" } else { "disabled" });
-    println!("   Reasoning:    {}", if config.reasoning_effort != "none" { &config.reasoning_effort } else { "disabled" });
+    println!(
+        "   Auth:         {}",
+        if config.anthropic_api_key.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "   Reasoning:    {}",
+        if config.reasoning_effort != "none" {
+            &config.reasoning_effort
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     // Start server

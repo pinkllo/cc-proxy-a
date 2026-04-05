@@ -1,6 +1,8 @@
 use crate::config::ProxyConfig;
 use crate::model_map;
-use crate::types::claude::{ContentBlock, Message, MessageContent, MessagesRequest, SystemContent, ToolResultContent};
+use crate::types::claude::{
+    ContentBlock, Message, MessageContent, MessagesRequest, SystemContent, ToolResultContent,
+};
 use crate::types::openai::*;
 
 /// Convert a Claude Messages API request to OpenAI Chat Completions format
@@ -50,7 +52,8 @@ pub fn claude_to_openai(req: &MessagesRequest, config: &ProxyConfig) -> ChatComp
         i += 1;
     }
 
-    let max_tokens = req.max_tokens
+    let max_tokens = req
+        .max_tokens
         .max(config.min_tokens_limit)
         .min(config.max_tokens_limit);
 
@@ -94,7 +97,9 @@ pub fn claude_to_openai(req: &MessagesRequest, config: &ProxyConfig) -> ChatComp
 
     // Stream options
     if request.stream {
-        request.stream_options = Some(StreamOptions { include_usage: true });
+        request.stream_options = Some(StreamOptions {
+            include_usage: true,
+        });
     }
 
     // Reasoning effort: per-tier > Claude thinking > global config
@@ -109,16 +114,14 @@ pub fn claude_to_openai(req: &MessagesRequest, config: &ProxyConfig) -> ChatComp
 fn extract_system_text(system: &SystemContent) -> String {
     match system {
         SystemContent::Text(s) => s.trim().to_string(),
-        SystemContent::Blocks(blocks) => {
-            blocks
-                .iter()
-                .filter(|b| b.block_type == "text")
-                .filter_map(|b| b.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-                .trim()
-                .to_string()
-        }
+        SystemContent::Blocks(blocks) => blocks
+            .iter()
+            .filter(|b| b.block_type == "text")
+            .filter_map(|b| b.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            .trim()
+            .to_string(),
     }
 }
 
@@ -140,9 +143,7 @@ fn convert_user_message(msg: &Message) -> ChatMessage {
             let parts: Vec<ContentPart> = blocks
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::Text { text } => {
-                        Some(ContentPart::Text { text: text.clone() })
-                    }
+                    ContentBlock::Text { text } => Some(ContentPart::Text { text: text.clone() }),
                     ContentBlock::Image { source } => {
                         if source.source_type == "base64" {
                             if let (Some(media), Some(data)) = (&source.media_type, &source.data) {
@@ -218,8 +219,16 @@ fn convert_assistant_message(msg: &Message) -> ChatMessage {
 
             ChatMessage {
                 role: "assistant".into(),
-                content: if text_parts.is_empty() { None } else { Some(ChatContent::Text(text_parts.join(""))) },
-                tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                content: if text_parts.is_empty() {
+                    None
+                } else {
+                    Some(ChatContent::Text(text_parts.join("")))
+                },
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
                 tool_call_id: None,
             }
         }
@@ -228,9 +237,9 @@ fn convert_assistant_message(msg: &Message) -> ChatMessage {
 
 fn has_tool_results(content: &MessageContent) -> bool {
     match content {
-        MessageContent::Blocks(blocks) => {
-            blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-        }
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
         _ => false,
     }
 }
@@ -239,22 +248,28 @@ fn convert_tool_results(msg: &Message) -> Vec<ChatMessage> {
     let mut results = Vec::new();
     if let MessageContent::Blocks(blocks) = &msg.content {
         for block in blocks {
-            if let ContentBlock::ToolResult { tool_use_id, content } = block {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+            } = block
+            {
                 let text = match content {
                     Some(ToolResultContent::Text(s)) => s.clone(),
-                    Some(ToolResultContent::Blocks(items)) => {
-                        items.iter()
-                            .filter_map(|item| {
-                                item.get("text").and_then(|v| v.as_str()).map(String::from)
-                                    .or_else(|| serde_json::to_string(item).ok())
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    }
-                    Some(ToolResultContent::Object(v)) => {
-                        v.get("text").and_then(|t| t.as_str()).map(String::from)
-                            .unwrap_or_else(|| serde_json::to_string(v).unwrap_or_default())
-                    }
+                    Some(ToolResultContent::Blocks(items)) => items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("text")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| serde_json::to_string(item).ok())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    Some(ToolResultContent::Object(v)) => v
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| serde_json::to_string(v).unwrap_or_default()),
                     None => "No content provided".into(),
                 };
 
@@ -271,7 +286,10 @@ fn convert_tool_results(msg: &Message) -> Vec<ChatMessage> {
 }
 
 fn convert_tool_choice(choice: &serde_json::Value) -> serde_json::Value {
-    let choice_type = choice.get("type").and_then(|v| v.as_str()).unwrap_or("auto");
+    let choice_type = choice
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
     match choice_type {
         "auto" => serde_json::json!("auto"),
         "any" => serde_json::json!("required"),
@@ -387,18 +405,35 @@ mod tests {
     #[test]
     fn test_extract_system_text_blocks() {
         let system = SystemContent::Blocks(vec![
-            SystemBlock { block_type: "text".into(), text: Some("First block.".into()), cache_control: None },
-            SystemBlock { block_type: "text".into(), text: Some("Second block.".into()), cache_control: None },
-            SystemBlock { block_type: "other".into(), text: Some("Ignored.".into()), cache_control: None },
+            SystemBlock {
+                block_type: "text".into(),
+                text: Some("First block.".into()),
+                cache_control: None,
+            },
+            SystemBlock {
+                block_type: "text".into(),
+                text: Some("Second block.".into()),
+                cache_control: None,
+            },
+            SystemBlock {
+                block_type: "other".into(),
+                text: Some("Ignored.".into()),
+                cache_control: None,
+            },
         ]);
-        assert_eq!(extract_system_text(&system), "First block.\n\nSecond block.");
+        assert_eq!(
+            extract_system_text(&system),
+            "First block.\n\nSecond block."
+        );
     }
 
     #[test]
     fn test_extract_system_text_empty_blocks() {
-        let system = SystemContent::Blocks(vec![
-            SystemBlock { block_type: "other".into(), text: None, cache_control: None },
-        ]);
+        let system = SystemContent::Blocks(vec![SystemBlock {
+            block_type: "other".into(),
+            text: None,
+            cache_control: None,
+        }]);
         assert_eq!(extract_system_text(&system), "");
     }
 
@@ -422,9 +457,9 @@ mod tests {
     fn test_user_message_single_text_block_optimized() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Text { text: "Only text".into() },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::Text {
+                text: "Only text".into(),
+            }]),
         };
         let result = convert_user_message(&msg);
         // Single text block should be optimized to plain string
@@ -441,7 +476,9 @@ mod tests {
         let msg = Message {
             role: "user".into(),
             content: MessageContent::Blocks(vec![
-                ContentBlock::Text { text: "What's in this image?".into() },
+                ContentBlock::Text {
+                    text: "What's in this image?".into(),
+                },
                 ContentBlock::Image {
                     source: ImageSource {
                         source_type: "base64".into(),
@@ -470,15 +507,13 @@ mod tests {
     fn test_user_message_image_non_base64_ignored() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Image {
-                    source: ImageSource {
-                        source_type: "url".into(),
-                        media_type: None,
-                        data: None,
-                    },
+            content: MessageContent::Blocks(vec![ContentBlock::Image {
+                source: ImageSource {
+                    source_type: "url".into(),
+                    media_type: None,
+                    data: None,
                 },
-            ]),
+            }]),
         };
         let result = convert_user_message(&msg);
         // Non-base64 image should be filtered out, resulting in empty parts
@@ -495,7 +530,9 @@ mod tests {
         let msg = Message {
             role: "assistant".into(),
             content: MessageContent::Blocks(vec![
-                ContentBlock::Text { text: "Let me search.".into() },
+                ContentBlock::Text {
+                    text: "Let me search.".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "call_123".into(),
                     name: "search".into(),
@@ -535,12 +572,10 @@ mod tests {
     fn test_tool_result_text() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_1".into(),
-                    content: Some(ToolResultContent::Text("result text".into())),
-                },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: Some(ToolResultContent::Text("result text".into())),
+            }]),
         };
         let results = convert_tool_results(&msg);
         assert_eq!(results.len(), 1);
@@ -556,15 +591,13 @@ mod tests {
     fn test_tool_result_blocks() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_2".into(),
-                    content: Some(ToolResultContent::Blocks(vec![
-                        serde_json::json!({"text": "block one"}),
-                        serde_json::json!({"text": "block two"}),
-                    ])),
-                },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_2".into(),
+                content: Some(ToolResultContent::Blocks(vec![
+                    serde_json::json!({"text": "block one"}),
+                    serde_json::json!({"text": "block two"}),
+                ])),
+            }]),
         };
         let results = convert_tool_results(&msg);
         assert_eq!(results.len(), 1);
@@ -578,14 +611,12 @@ mod tests {
     fn test_tool_result_object_with_text() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_3".into(),
-                    content: Some(ToolResultContent::Object(
-                        serde_json::json!({"text": "object text", "extra": 42}),
-                    )),
-                },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_3".into(),
+                content: Some(ToolResultContent::Object(
+                    serde_json::json!({"text": "object text", "extra": 42}),
+                )),
+            }]),
         };
         let results = convert_tool_results(&msg);
         match &results[0].content {
@@ -598,14 +629,12 @@ mod tests {
     fn test_tool_result_object_no_text_field() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_4".into(),
-                    content: Some(ToolResultContent::Object(
-                        serde_json::json!({"code": 200, "data": "ok"}),
-                    )),
-                },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_4".into(),
+                content: Some(ToolResultContent::Object(
+                    serde_json::json!({"code": 200, "data": "ok"}),
+                )),
+            }]),
         };
         let results = convert_tool_results(&msg);
         match &results[0].content {
@@ -622,12 +651,10 @@ mod tests {
     fn test_tool_result_none() {
         let msg = Message {
             role: "user".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_5".into(),
-                    content: None,
-                },
-            ]),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_5".into(),
+                content: None,
+            }]),
         };
         let results = convert_tool_results(&msg);
         match &results[0].content {
@@ -764,7 +791,8 @@ mod tests {
         let effort = resolve_reasoning_effort(&req, &config, Some(crate::config::ModelTier::Big));
         assert_eq!(effort.as_deref(), Some("xhigh"));
         // Middle falls back to global
-        let effort = resolve_reasoning_effort(&req, &config, Some(crate::config::ModelTier::Middle));
+        let effort =
+            resolve_reasoning_effort(&req, &config, Some(crate::config::ModelTier::Middle));
         assert_eq!(effort.as_deref(), Some("low"));
     }
 

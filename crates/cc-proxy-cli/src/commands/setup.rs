@@ -285,7 +285,8 @@ fn collect_optional() -> Result<(u16, Option<String>, String)> {
         3 => "high",
         4 => "xhigh",
         _ => "none",
-    }.to_string();
+    }
+    .to_string();
 
     let want_auth = Confirm::new()
         .with_prompt("是否配置 ANTHROPIC_API_KEY (用于鉴权)")
@@ -298,7 +299,11 @@ fn collect_optional() -> Result<(u16, Option<String>, String)> {
             .with_prompt("输入 ANTHROPIC_API_KEY")
             .interact()
             .context("输入 ANTHROPIC_API_KEY 失败")?;
-        if key.trim().is_empty() { None } else { Some(key) }
+        if key.trim().is_empty() {
+            None
+        } else {
+            Some(key)
+        }
     } else {
         None
     };
@@ -353,9 +358,7 @@ fn build_config(
 fn save_config(config: &ProxyConfig) -> Result<()> {
     let path = ProxyConfig::default_config_path();
 
-    config
-        .save_to_file(&path)
-        .context("保存配置文件失败")?;
+    config.save_to_file(&path).context("保存配置文件失败")?;
 
     println!();
     println!(
@@ -379,7 +382,10 @@ fn print_summary(config: &ProxyConfig) {
 
     println!();
     println!("  {}", style("═══ 配置摘要 ═══").cyan().bold());
-    println!("  Base URL:      {}", style(&config.openai_base_url).white());
+    println!(
+        "  Base URL:      {}",
+        style(&config.openai_base_url).white()
+    );
     println!("  API Key:       {}", style(&masked_key).dim());
     println!("  BIG_MODEL:     {}", style(&config.big_model).green());
     println!(

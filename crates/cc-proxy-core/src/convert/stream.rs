@@ -192,10 +192,7 @@ pub fn openai_stream_to_claude(
 // Prologue: opening three events
 // ---------------------------------------------------------------------------
 
-fn emit_prologue(
-    state: &ConverterState<impl Stream>,
-    buf: &mut std::collections::VecDeque<Event>,
-) {
+fn emit_prologue(state: &ConverterState<impl Stream>, buf: &mut std::collections::VecDeque<Event>) {
     // 1. message_start — empty message envelope
     let message_start_data = json!({
         "type": sse::MESSAGE_START,
@@ -331,9 +328,7 @@ fn process_chunk(
                                     "partial_json": args_fragment
                                 }
                             });
-                            buf.push_back(
-                                make_sse(sse::CONTENT_BLOCK_DELTA, &data),
-                            );
+                            buf.push_back(make_sse(sse::CONTENT_BLOCK_DELTA, &data));
                         }
                     }
                 }
@@ -351,10 +346,7 @@ fn process_chunk(
 // Epilogue: closing events
 // ---------------------------------------------------------------------------
 
-fn emit_epilogue(
-    state: &ConverterState<impl Stream>,
-    buf: &mut std::collections::VecDeque<Event>,
-) {
+fn emit_epilogue(state: &ConverterState<impl Stream>, buf: &mut std::collections::VecDeque<Event>) {
     // 1. content_block_stop for the text block.
     let text_stop = json!({
         "type": sse::CONTENT_BLOCK_STOP,
@@ -417,17 +409,17 @@ fn make_sse(event_name: &str, data: &serde_json::Value) -> Event {
     // matching the Python `ensure_ascii=False` behavior.
     let json_str = serde_json::to_string(data).unwrap_or_else(|e| {
         error!("failed to serialize SSE data: {e}");
-        format!(r#"{{"type":"error","error":{{"type":"serialization_error","message":"{}"}}}}"#, e)
+        format!(
+            r#"{{"type":"error","error":{{"type":"serialization_error","message":"{}"}}}}"#,
+            e
+        )
     });
     Event::default().event(event_name).data(json_str)
 }
 
 /// Emit an SSE error event (non-fatal — the stream continues to the next phase
 /// or terminates, but the consumer still sees a well-formed event).
-fn emit_error_event(
-    message: &str,
-    buf: &mut std::collections::VecDeque<Event>,
-) {
+fn emit_error_event(message: &str, buf: &mut std::collections::VecDeque<Event>) {
     let data = json!({
         "type": "error",
         "error": {
@@ -586,7 +578,12 @@ mod tests {
         // Prologue(3) + content_block_start(tool) + 2 input_json_deltas (one per chunk) + finish(nothing)
         // Epilogue: text_stop + tool_stop + message_delta + message_stop = 4
         // Total = 3 + 1 (tool block start) + 2 (json deltas) + 4 = 10
-        assert_eq!(result.len(), 10, "expected 10 events for tool call stream, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            10,
+            "expected 10 events for tool call stream, got {}",
+            result.len()
+        );
     }
 
     #[tokio::test]
@@ -600,7 +597,12 @@ mod tests {
 
         // Prologue(3) + text_delta(1) + error(1) + Epilogue(3) = 8
         // Epilogue still emitted after error for proper stream termination.
-        assert_eq!(result.len(), 8, "expected 8 events with error, got {}", result.len());
+        assert_eq!(
+            result.len(),
+            8,
+            "expected 8 events with error, got {}",
+            result.len()
+        );
     }
 
     #[tokio::test]

@@ -29,7 +29,9 @@ pub struct MessagesRequest {
     pub thinking: Option<ThinkingConfig>,
 }
 
-fn default_temperature() -> Option<f64> { Some(1.0) }
+fn default_temperature() -> Option<f64> {
+    Some(1.0)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

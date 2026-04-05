@@ -73,7 +73,11 @@ pub async fn run() -> Result<()> {
             println!(
                 "  API 密钥:   {}",
                 if config.openai_api_key.len() > 8 {
-                    format!("{}...{}", &config.openai_api_key[..4], &config.openai_api_key[config.openai_api_key.len()-4..])
+                    format!(
+                        "{}...{}",
+                        &config.openai_api_key[..4],
+                        &config.openai_api_key[config.openai_api_key.len() - 4..]
+                    )
                 } else {
                     "已配置".to_string()
                 }
@@ -107,10 +111,7 @@ pub async fn run() -> Result<()> {
                         .get("openai_api_configured")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    println!(
-                        "  上游 API 已配置: {}",
-                        if api_ok { "是" } else { "否" }
-                    );
+                    println!("  上游 API 已配置: {}", if api_ok { "是" } else { "否" });
                 }
                 None => {
                     println!("  状态: 未运行");

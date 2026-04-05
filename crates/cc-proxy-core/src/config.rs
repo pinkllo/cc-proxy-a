@@ -65,23 +65,46 @@ impl std::fmt::Debug for ProxyConfig {
             .field("small_model", &self.small_model)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("anthropic_api_key", &self.anthropic_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "anthropic_api_key",
+                &self.anthropic_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("log_level", &self.log_level)
             .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
 
-fn default_base_url() -> String { "https://api.openai.com/v1".into() }
-fn default_big_model() -> String { "gpt-4o".into() }
-fn default_small_model() -> String { "gpt-4o-mini".into() }
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_port() -> u16 { 8082 }
-fn default_log_level() -> String { "info".into() }
-fn default_max_tokens() -> u32 { 4096 }
-fn default_min_tokens() -> u32 { 100 }
-fn default_timeout() -> u64 { 90 }
-fn default_reasoning_effort() -> String { "none".into() }
+fn default_base_url() -> String {
+    "https://api.openai.com/v1".into()
+}
+fn default_big_model() -> String {
+    "gpt-4o".into()
+}
+fn default_small_model() -> String {
+    "gpt-4o-mini".into()
+}
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_port() -> u16 {
+    8082
+}
+fn default_log_level() -> String {
+    "info".into()
+}
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_min_tokens() -> u32 {
+    100
+}
+fn default_timeout() -> u64 {
+    90
+}
+fn default_reasoning_effort() -> String {
+    "none".into()
+}
 
 impl ProxyConfig {
     /// Effective middle model (falls back to big_model)
@@ -125,21 +148,32 @@ impl ProxyConfig {
             middle_model,
             small_model: env_or("SMALL_MODEL", &default_small_model()),
             host: env_or("HOST", &default_host()),
-            port: env_or("PORT", &default_port().to_string()).parse().unwrap_or(default_port()),
+            port: env_or("PORT", &default_port().to_string())
+                .parse()
+                .unwrap_or(default_port()),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             azure_api_version: std::env::var("AZURE_API_VERSION").ok(),
             log_level: env_or("LOG_LEVEL", &default_log_level()),
             max_tokens_limit: env_or("MAX_TOKENS_LIMIT", &default_max_tokens().to_string())
-                .parse().unwrap_or(default_max_tokens()),
+                .parse()
+                .unwrap_or(default_max_tokens()),
             min_tokens_limit: env_or("MIN_TOKENS_LIMIT", &default_min_tokens().to_string())
-                .parse().unwrap_or(default_min_tokens()),
+                .parse()
+                .unwrap_or(default_min_tokens()),
             request_timeout: env_or("REQUEST_TIMEOUT", &default_timeout().to_string())
-                .parse().unwrap_or(default_timeout()),
+                .parse()
+                .unwrap_or(default_timeout()),
             custom_headers,
             reasoning_effort: env_or("REASONING_EFFORT", &default_reasoning_effort()),
-            big_reasoning: std::env::var("BIG_REASONING").ok().filter(|s| !s.is_empty()),
-            middle_reasoning: std::env::var("MIDDLE_REASONING").ok().filter(|s| !s.is_empty()),
-            small_reasoning: std::env::var("SMALL_REASONING").ok().filter(|s| !s.is_empty()),
+            big_reasoning: std::env::var("BIG_REASONING")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            middle_reasoning: std::env::var("MIDDLE_REASONING")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            small_reasoning: std::env::var("SMALL_REASONING")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 
@@ -184,8 +218,12 @@ impl ProxyConfig {
     /// Extract CUSTOM_HEADER_* env vars (blocklist sensitive headers)
     fn load_custom_headers() -> HashMap<String, String> {
         const BLOCKED: &[&str] = &[
-            "host", "authorization", "content-type", "content-length",
-            "transfer-encoding", "connection",
+            "host",
+            "authorization",
+            "content-type",
+            "content-length",
+            "transfer-encoding",
+            "connection",
         ];
         std::env::vars()
             .filter(|(k, _)| k.starts_with("CUSTOM_HEADER_"))

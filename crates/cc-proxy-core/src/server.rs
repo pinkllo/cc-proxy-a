@@ -121,8 +121,7 @@ async fn create_message(
             .chat_completion(&openai_request, &state.config.openai_api_key)
             .await?;
 
-        let claude_response =
-            convert::response::openai_to_claude(&openai_response, &request.model);
+        let claude_response = convert::response::openai_to_claude(&openai_response, &request.model);
 
         Ok(Json(claude_response).into_response())
     }

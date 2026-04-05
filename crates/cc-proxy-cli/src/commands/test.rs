@@ -22,7 +22,12 @@ async fn is_proxy_running(port: u16) -> bool {
         .build()
         .unwrap_or_default();
 
-    client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+    client
+        .get(&url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// 通过代理的 /test-connection 端点测试
@@ -40,17 +45,29 @@ async fn test_via_proxy(port: u16) -> Result<()> {
 
     let body: serde_json::Value = resp.json().await?;
 
-    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let status = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     if status == "success" {
-        let model = body.get("model_used").and_then(|v| v.as_str()).unwrap_or("未知");
-        let resp_id = body.get("response_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let model = body
+            .get("model_used")
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知");
+        let resp_id = body
+            .get("response_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         println!("  连接测试成功！");
         println!("  使用模型:   {model}");
         println!("  响应 ID:    {resp_id}");
         println!("  延迟:       {:.0}ms", latency.as_millis());
     } else {
-        let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("未知错误");
+        let error = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知错误");
         println!("  连接测试失败");
         println!("  错误信息: {error}");
         println!("  延迟:     {:.0}ms", latency.as_millis());
@@ -129,7 +146,11 @@ async fn test_upstream_direct(config: &ProxyConfig) -> Result<()> {
                     }
                 } else {
                     // 截断过长的原始响应
-                    let display = if body.len() > 500 { &body[..500] } else { &body };
+                    let display = if body.len() > 500 {
+                        &body[..500]
+                    } else {
+                        &body
+                    };
                     println!("    {display}");
                 }
             }

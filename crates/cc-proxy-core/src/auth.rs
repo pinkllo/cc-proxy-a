@@ -1,10 +1,4 @@
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-    Extension,
-};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response, Extension};
 use serde_json::json;
 
 /// Middleware: validate client API key if ANTHROPIC_API_KEY is configured.

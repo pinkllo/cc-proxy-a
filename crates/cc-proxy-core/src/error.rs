@@ -34,7 +34,9 @@ impl ProxyError {
         match self {
             Self::Auth(_) => StatusCode::UNAUTHORIZED,
             Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
-            Self::ClientDisconnected => StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+            Self::ClientDisconnected => {
+                StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST)
+            }
             Self::Upstream(e) => {
                 if e.is_timeout() {
                     StatusCode::GATEWAY_TIMEOUT
@@ -60,7 +62,9 @@ impl ProxyError {
         if lower.contains("rate_limit") || lower.contains("quota") {
             return "Rate limit exceeded. Wait and retry, or upgrade your plan.".into();
         }
-        if lower.contains("model") && (lower.contains("not found") || lower.contains("does not exist")) {
+        if lower.contains("model")
+            && (lower.contains("not found") || lower.contains("does not exist"))
+        {
             return "Model not found. Check BIG_MODEL / SMALL_MODEL config.".into();
         }
         msg.to_string()
