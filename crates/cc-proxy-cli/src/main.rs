@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use console::style;
 use dialoguer::Select;
 
+mod claude_config;
 mod commands;
 mod daemon;
 
@@ -34,7 +35,6 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ONLY load .env when running subcommands (not interactive menu)
     let cli = Cli::parse();
 
     match cli.command {
@@ -80,15 +80,21 @@ async fn interactive_menu() -> anyhow::Result<()> {
     loop {
         let has_config = config_file_exists();
         let proxy_running = check_proxy_running().await;
+        let cc_configured = claude_config::is_configured();
 
         // ── Status bar ──
         if has_config {
-            let status = if proxy_running {
+            let proxy_status = if proxy_running {
                 style("● 代理运行中").green().to_string()
             } else {
                 style("○ 代理未运行").dim().to_string()
             };
-            println!("  {}", status);
+            let cc_status = if cc_configured {
+                style("● Claude Code 已接入").green().to_string()
+            } else {
+                style("○ Claude Code 未接入").yellow().to_string()
+            };
+            println!("  {}    {}", proxy_status, cc_status);
         } else {
             println!("  {}", style("⚠ 尚未配置").yellow());
         }
@@ -99,6 +105,7 @@ async fn interactive_menu() -> anyhow::Result<()> {
         let mut actions: Vec<&str> = Vec::new();
 
         if has_config {
+            // 启动/重启
             if proxy_running {
                 items.push(mi("🔄", "重启代理", "停止后重新启动"));
                 actions.push("restart");
@@ -107,10 +114,31 @@ async fn interactive_menu() -> anyhow::Result<()> {
                 actions.push("start");
             }
 
+            // Claude Code 一键接入/断开
+            if cc_configured {
+                items.push(mi(
+                    "🔌",
+                    "断开 Claude Code",
+                    "从 settings.json 移除代理配置",
+                ));
+                actions.push("cc-disconnect");
+            } else {
+                items.push(mi(
+                    "⚡",
+                    "接入 Claude Code",
+                    "一键写入 settings.json",
+                ));
+                actions.push("cc-connect");
+            }
+
             items.push(mi("🔑", "连接信息", "查看地址和密钥"));
             actions.push("info");
 
-            items.push(mi("📊", "查看状态", if proxy_running { "运行中" } else { "已停止" }));
+            items.push(mi(
+                "📊",
+                "查看状态",
+                if proxy_running { "运行中" } else { "已停止" },
+            ));
             actions.push("status");
 
             items.push(mi("🔗", "测试连接", "测试上游 API"));
@@ -122,16 +150,24 @@ async fn interactive_menu() -> anyhow::Result<()> {
             }
         }
 
-        items.push(mi("⚙", "配置向导", if has_config { "修改配置" } else { "首次使用请先配置" }));
+        items.push(mi(
+            "⚙",
+            "配置向导",
+            if has_config {
+                "修改配置"
+            } else {
+                "首次使用请先配置"
+            },
+        ));
         actions.push("setup");
 
         items.push(mi("Q", "退出", ""));
         actions.push("quit");
 
         let default_idx = if !has_config {
-            items.len() - 2 // 配置向导
+            items.len() - 2
         } else {
-            0 // 启动/重启 (always first when configured)
+            0
         };
 
         let selection = Select::new()
@@ -147,20 +183,29 @@ async fn interactive_menu() -> anyhow::Result<()> {
         match actions[idx] {
             "start" => {
                 daemon::start_daemon()?;
-                print_connection_info();
+                // 启动后自动接入 Claude Code
+                auto_connect_claude_code();
             }
             "restart" => {
                 println!("  {} 正在重启...", style("🔄").yellow());
                 let _ = commands::stop::run();
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 daemon::start_daemon()?;
-                print_connection_info();
+                auto_connect_claude_code();
+            }
+            "cc-connect" => {
+                connect_claude_code();
+            }
+            "cc-disconnect" => {
+                disconnect_claude_code();
             }
             "info" => {
                 print_connection_info();
             }
             "status" => {
                 commands::status::run().await?;
+                println!();
+                claude_config::print_status();
             }
             "test" => {
                 commands::test::run().await?;
@@ -182,13 +227,102 @@ async fn interactive_menu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Claude Code Integration ──
+
+fn connect_claude_code() {
+    let port = get_config_port();
+    let auth_key = get_config_auth_key().unwrap_or_else(|| "any-value".into());
+
+    match claude_config::configure(port, &auth_key) {
+        Ok(()) => {
+            println!(
+                "  {} Claude Code 已配置为使用 cc-proxy",
+                style("✔").green().bold()
+            );
+            println!(
+                "  {} 已写入 ~/.claude/settings.json",
+                style("  ").dim()
+            );
+            println!();
+            println!(
+                "  {} 直接运行 {} 即可使用代理",
+                style("💡").cyan(),
+                style("claude").green().bold()
+            );
+        }
+        Err(e) => {
+            println!(
+                "  {} 配置 Claude Code 失败: {e}",
+                style("✗").red().bold()
+            );
+        }
+    }
+}
+
+fn disconnect_claude_code() {
+    match claude_config::unconfigure() {
+        Ok(()) => {
+            println!(
+                "  {} 已从 Claude Code 移除代理配置",
+                style("✔").green().bold()
+            );
+            println!(
+                "  {} Claude Code 将恢复使用官方 API",
+                style("  ").dim()
+            );
+        }
+        Err(e) => {
+            println!("  {} 移除配置失败: {e}", style("✗").red().bold());
+        }
+    }
+}
+
+fn auto_connect_claude_code() {
+    if !claude_config::claude_code_installed() {
+        print_connection_info();
+        return;
+    }
+
+    if claude_config::is_configured() {
+        println!();
+        println!(
+            "  {} Claude Code 已接入，直接运行 {} 即可",
+            style("✔").green().bold(),
+            style("claude").green().bold()
+        );
+        return;
+    }
+
+    // 自动接入
+    let port = get_config_port();
+    let auth_key = get_config_auth_key().unwrap_or_else(|| "any-value".into());
+    match claude_config::configure(port, &auth_key) {
+        Ok(()) => {
+            println!();
+            println!(
+                "  {} Claude Code 已自动接入，直接运行 {} 即可",
+                style("⚡").cyan(),
+                style("claude").green().bold()
+            );
+        }
+        Err(_) => {
+            print_connection_info();
+        }
+    }
+}
+
 // ── Helpers ──
 
 fn mi(icon: &str, label: &str, desc: &str) -> String {
     if desc.is_empty() {
         format!("  {}  {}", icon, style(label).white())
     } else {
-        format!("  {}  {:<12} {}", icon, style(label).white(), style(format!("— {desc}")).dim())
+        format!(
+            "  {}  {:<16} {}",
+            icon,
+            style(label).white(),
+            style(format!("— {desc}")).dim()
+        )
     }
 }
 
@@ -196,7 +330,6 @@ fn config_file_exists() -> bool {
     cc_proxy_core::config::ProxyConfig::default_config_path().exists()
 }
 
-/// Read port and auth key from config.json without full ProxyConfig::load()
 fn read_config_json() -> Option<serde_json::Value> {
     let path = cc_proxy_core::config::ProxyConfig::default_config_path();
     let content = std::fs::read_to_string(path).ok()?;
@@ -211,8 +344,11 @@ fn get_config_port() -> u16 {
 }
 
 fn get_config_auth_key() -> Option<String> {
-    read_config_json()
-        .and_then(|v| v.get("anthropic_api_key").and_then(|k| k.as_str()).map(String::from))
+    read_config_json().and_then(|v| {
+        v.get("anthropic_api_key")
+            .and_then(|k| k.as_str())
+            .map(String::from)
+    })
 }
 
 async fn check_proxy_running() -> bool {
@@ -229,35 +365,43 @@ fn print_connection_info() {
     let port = get_config_port();
     let auth_key = get_config_auth_key().unwrap_or_else(|| "any-value".into());
 
-    println!("  {}── {} ──{}", style("──────").dim(), style("连接信息").bold().cyan(), style("──────").dim());
-    println!();
-    println!("  {}  http://localhost:{}", style("代理地址:").dim(), style(port).green());
-    println!("  {}  {}", style("鉴权密钥:").dim(), style(&auth_key).green());
-    println!();
-    println!("  {} 在终端中运行:", style("使用方法:").dim());
-    println!();
     println!(
-        "  {}",
-        style(format!(
-            "ANTHROPIC_BASE_URL=http://localhost:{port} ANTHROPIC_API_KEY=\"{auth_key}\" claude"
-        )).green()
+        "  {}── {} ──{}",
+        style("──────").dim(),
+        style("连接信息").bold().cyan(),
+        style("──────").dim()
     );
     println!();
-    println!("  {} 写入 shell 配置 (永久生效):", style("或者:").dim());
+    println!(
+        "  {}  http://localhost:{}",
+        style("代理地址:").dim(),
+        style(port).green()
+    );
+    println!(
+        "  {}  {}",
+        style("鉴权密钥:").dim(),
+        style(&auth_key).green()
+    );
     println!();
-    println!(
-        "  {}",
-        style(format!(
-            "echo 'export ANTHROPIC_BASE_URL=http://localhost:{port}' >> ~/.zshrc"
-        )).dim()
-    );
-    println!(
-        "  {}",
-        style(format!(
-            "echo 'export ANTHROPIC_API_KEY={auth_key}' >> ~/.zshrc"
-        )).dim()
-    );
-    println!("  {}", style("source ~/.zshrc && claude").dim());
+
+    if claude_config::claude_code_installed() {
+        claude_config::print_status();
+        if !claude_config::is_configured() {
+            println!(
+                "  {} 选择菜单「接入 Claude Code」可一键配置",
+                style("💡").cyan()
+            );
+        }
+    } else {
+        println!("  {} 手动启动:", style("使用方法:").dim());
+        println!(
+            "  {}",
+            style(format!(
+                "ANTHROPIC_BASE_URL=http://localhost:{port} ANTHROPIC_API_KEY=\"{auth_key}\" ANTHROPIC_AUTH_TOKEN=\"\" claude"
+            ))
+            .green()
+        );
+    }
     println!();
 }
 
@@ -266,13 +410,48 @@ fn print_banner() {
     let d = |s: &str| style(s).dim().to_string();
 
     println!();
-    println!("  {}", c("┌─────────────────────────────────────────────────────┐"));
-    println!("  {}                                                     {}", c("│"), c("│"));
-    println!("  {}              {}              {}", c("│"), style("cc-proxy").bold().white(), c("│"));
-    println!("  {}        {}        {}", c("│"), d("Claude Code ↔ Any LLM Provider"), c("│"));
-    println!("  {}                                                     {}", c("│"), c("│"));
-    println!("  {}        {}   |   {}   |   {}            {}", c("│"), style("v0.1.5").green(), style("Rust").yellow(), d("6.4MB"), c("│"));
-    println!("  {}                                                     {}", c("│"), c("│"));
-    println!("  {}", c("└─────────────────────────────────────────────────────┘"));
+    println!(
+        "  {}",
+        c("┌─────────────────────────────────────────────────────┐")
+    );
+    println!(
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
+    );
+    println!(
+        "  {}              {}              {}",
+        c("│"),
+        style("cc-proxy").bold().white(),
+        c("│")
+    );
+    println!(
+        "  {}        {}        {}",
+        c("│"),
+        d("Claude Code ↔ Any LLM Provider"),
+        c("│")
+    );
+    println!(
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
+    );
+    println!(
+        "  {}        {}   |   {}   |   {}            {}",
+        c("│"),
+        style("v0.1.7").green(),
+        style("Rust").yellow(),
+        d("6.4MB"),
+        c("│")
+    );
+    println!(
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
+    );
+    println!(
+        "  {}",
+        c("└─────────────────────────────────────────────────────┘")
+    );
     println!();
 }
