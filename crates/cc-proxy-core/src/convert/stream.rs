@@ -293,42 +293,44 @@ fn process_chunk(
                 }
 
                 // Emit content_block_start once we have both id and name.
-                if acc.id.is_some() && acc.name.is_some() && !acc.started {
-                    state.tool_block_counter += 1;
-                    let claude_index = state.text_block_index + state.tool_block_counter;
-                    acc.claude_index = Some(claude_index);
-                    acc.started = true;
+                if let (Some(ref id), Some(ref name)) = (&acc.id, &acc.name) {
+                    if !acc.started {
+                        state.tool_block_counter += 1;
+                        let claude_index = state.text_block_index + state.tool_block_counter;
+                        acc.claude_index = Some(claude_index);
+                        acc.started = true;
 
-                    let data = json!({
-                        "type": sse::CONTENT_BLOCK_START,
-                        "index": claude_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": acc.id.as_ref().unwrap(),
-                            "name": acc.name.as_ref().unwrap(),
-                            "input": {}
-                        }
-                    });
-                    buf.push_back(make_sse(sse::CONTENT_BLOCK_START, &data));
+                        let data = json!({
+                            "type": sse::CONTENT_BLOCK_START,
+                            "index": claude_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": id,
+                                "name": name,
+                                "input": {}
+                            }
+                        });
+                        buf.push_back(make_sse(sse::CONTENT_BLOCK_START, &data));
+                    }
                 }
 
                 // Accumulate function arguments and emit input_json_delta incrementally.
                 if let Some(ref func) = tc_delta.function {
                     if let Some(ref args_fragment) = func.arguments {
-                        if acc.started && !args_fragment.is_empty() {
-                            acc.args_buffer.push_str(args_fragment);
+                        if let Some(claude_idx) = acc.claude_index {
+                            if !args_fragment.is_empty() {
+                                acc.args_buffer.push_str(args_fragment);
 
-                            // Emit each fragment as partial_json immediately.
-                            // Claude Code expects incremental deltas, not buffered-until-valid.
-                            let data = json!({
-                                "type": sse::CONTENT_BLOCK_DELTA,
-                                "index": acc.claude_index.unwrap(),
-                                "delta": {
-                                    "type": sse::DELTA_INPUT_JSON,
-                                    "partial_json": args_fragment
-                                }
-                            });
-                            buf.push_back(make_sse(sse::CONTENT_BLOCK_DELTA, &data));
+                                let data = json!({
+                                    "type": sse::CONTENT_BLOCK_DELTA,
+                                    "index": claude_idx,
+                                    "delta": {
+                                        "type": sse::DELTA_INPUT_JSON,
+                                        "partial_json": args_fragment
+                                    }
+                                });
+                                buf.push_back(make_sse(sse::CONTENT_BLOCK_DELTA, &data));
+                            }
                         }
                     }
                 }

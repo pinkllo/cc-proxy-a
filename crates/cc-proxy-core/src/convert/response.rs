@@ -47,7 +47,7 @@ pub fn openai_to_claude(
     // Map finish reason
     let has_tool_calls = message
         .and_then(|m| m.tool_calls.as_ref())
-        .map_or(false, |tc| !tc.is_empty());
+        .is_some_and(|tc| !tc.is_empty());
 
     let finish_reason = choice
         .and_then(|c| c.finish_reason.as_deref())

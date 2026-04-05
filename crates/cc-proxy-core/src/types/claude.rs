@@ -59,18 +59,13 @@ pub struct Message {
     pub content: MessageContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
     Blocks(Vec<ContentBlock>),
+    #[default]
     Null,
-}
-
-impl Default for MessageContent {
-    fn default() -> Self {
-        Self::Null
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
