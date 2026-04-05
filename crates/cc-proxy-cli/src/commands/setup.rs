@@ -28,67 +28,6 @@ const REASONING_LEVELS: &[(&str, &str)] = &[
     ("xhigh", "极高 — 深度推理"),
 ];
 
-// ─── Provider Presets ───────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct ProviderPreset {
-    name: &'static str,
-    base_url: &'static str,
-    default_big: &'static str,
-    default_middle: &'static str,
-    default_small: &'static str,
-    needs_key: bool,
-    is_azure: bool,
-}
-
-const PROVIDERS: &[ProviderPreset] = &[
-    ProviderPreset {
-        name: "OpenAI / 第三方中转",
-        base_url: "https://api.openai.com/v1",
-        default_big: "gpt-5.4",
-        default_middle: "gpt-5.4",
-        default_small: "gpt-5.4-mini",
-        needs_key: true,
-        is_azure: false,
-    },
-    ProviderPreset {
-        name: "DeepSeek (国内推荐)",
-        base_url: "https://api.deepseek.com",
-        default_big: "deepseek-chat",
-        default_middle: "deepseek-chat",
-        default_small: "deepseek-chat",
-        needs_key: true,
-        is_azure: false,
-    },
-    ProviderPreset {
-        name: "Ollama (本地部署)",
-        base_url: "http://localhost:11434/v1",
-        default_big: "qwen2.5:14b",
-        default_middle: "qwen2.5:14b",
-        default_small: "qwen2.5:7b",
-        needs_key: false,
-        is_azure: false,
-    },
-    ProviderPreset {
-        name: "Azure OpenAI",
-        base_url: "",
-        default_big: "gpt-4o",
-        default_middle: "gpt-4o",
-        default_small: "gpt-4o-mini",
-        needs_key: true,
-        is_azure: true,
-    },
-    ProviderPreset {
-        name: "自定义服务商",
-        base_url: "",
-        default_big: "",
-        default_middle: "",
-        default_small: "",
-        needs_key: true,
-        is_azure: false,
-    },
-];
-
 // ═══════════════════════════════════════════════════════════════════
 //  Entry Point
 // ═══════════════════════════════════════════════════════════════════
@@ -96,13 +35,25 @@ const PROVIDERS: &[ProviderPreset] = &[
 pub async fn run() -> Result<()> {
     print_banner();
 
-    // Step 1: Provider
-    let provider = select_provider()?;
-    let base_url = resolve_base_url(&provider)?;
-    let azure_api_version = resolve_azure_version(&provider)?;
-    let api_key = collect_api_key(&provider)?;
+    // Step 1: API 连接
+    print_section("API 连接");
 
-    // Step 2: Models (per-tier with presets)
+    let base_url: String = Input::new()
+        .with_prompt("  API Base URL")
+        .default("https://api.openai.com/v1".to_string())
+        .interact_text()
+        .context("输入 URL 失败")?;
+
+    let api_key = Password::new()
+        .with_prompt("  API Key")
+        .interact()
+        .context("输入 Key 失败")?;
+
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API Key 不能为空");
+    }
+
+    // Step 2: 模型配置
     print_section("模型配置");
     println!(
         "  {}",
@@ -116,16 +67,16 @@ pub async fn run() -> Result<()> {
     );
     println!();
 
-    let big_model = select_model("BIG (opus 映射)", provider.default_big)?;
+    let big_model = select_model("BIG (opus 映射)", "gpt-5.4")?;
     let big_reasoning = select_reasoning(&format!("BIG [{}]", big_model))?;
 
-    let middle_model = select_model("MIDDLE (sonnet 映射)", provider.default_middle)?;
+    let middle_model = select_model("MIDDLE (sonnet 映射)", "gpt-5.4")?;
     let middle_reasoning = select_reasoning(&format!("MIDDLE [{}]", middle_model))?;
 
-    let small_model = select_model("SMALL (haiku 映射)", provider.default_small)?;
+    let small_model = select_model("SMALL (haiku 映射)", "gpt-5.4-mini")?;
     let small_reasoning = select_reasoning(&format!("SMALL [{}]", small_model))?;
 
-    // Step 3: Server settings
+    // Step 3: 服务设置
     print_section("服务设置");
     let port: u16 = Input::new()
         .with_prompt("  代理端口")
@@ -133,7 +84,7 @@ pub async fn run() -> Result<()> {
         .interact_text()
         .context("输入端口失败")?;
 
-    // Auto-generate auth key (no user input needed)
+    // 自动生成鉴权密钥
     let anthropic_key = generate_auth_key();
     println!(
         "  {} 已自动生成鉴权密钥: {}",
@@ -157,7 +108,7 @@ pub async fn run() -> Result<()> {
         host: "0.0.0.0".to_string(),
         port,
         anthropic_api_key: Some(anthropic_key),
-        azure_api_version,
+        azure_api_version: None,
         log_level: "info".to_string(),
         max_tokens_limit: 4096,
         min_tokens_limit: 100,
@@ -197,13 +148,6 @@ pub async fn run() -> Result<()> {
 
     if start_now {
         println!();
-        println!(
-            "  {} 正在启动 cc-proxy on {}:{} ...",
-            style("▶").green().bold(),
-            config.host,
-            config.port
-        );
-        println!();
         cc_proxy_core::server::serve(config).await?;
     } else {
         println!();
@@ -211,7 +155,6 @@ pub async fn run() -> Result<()> {
             "  配置已保存。运行 {} 启动代理",
             style("cc-proxy start").bold().green()
         );
-        println!();
     }
 
     Ok(())
@@ -222,37 +165,53 @@ pub async fn run() -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════
 
 fn print_banner() {
-    let cyan = |s: &str| style(s).cyan().to_string();
-    let dim = |s: &str| style(s).dim().to_string();
-    let green = |s: &str| style(s).green().to_string();
-    let yellow = |s: &str| style(s).yellow().to_string();
+    let c = |s: &str| style(s).cyan().to_string();
+    let d = |s: &str| style(s).dim().to_string();
 
     println!();
-    println!("  {}", cyan("┌─────────────────────────────────────────────────────┐"));
-    println!("  {}                                                     {}", cyan("│"), cyan("│"));
     println!(
-        "  {}      {}     {}",
-        cyan("│"),
+        "  {}",
+        c("┌─────────────────────────────────────────────────────┐")
+    );
+    println!(
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
+    );
+    println!(
+        "  {}              {}              {}",
+        c("│"),
         style("cc-proxy").bold().white(),
-        cyan("│")
+        c("│")
     );
     println!(
-        "  {}      {}      {}",
-        cyan("│"),
-        dim("Claude Code ↔ Any LLM Provider"),
-        cyan("│")
+        "  {}        {}        {}",
+        c("│"),
+        d("Claude Code ↔ Any LLM Provider"),
+        c("│")
     );
-    println!("  {}                                                     {}", cyan("│"), cyan("│"));
     println!(
-        "  {}      {}  |  {}  |  {}       {}",
-        cyan("│"),
-        green("v0.1.0"),
-        yellow("Rust"),
-        dim("6.4MB"),
-        cyan("│")
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
     );
-    println!("  {}                                                     {}", cyan("│"), cyan("│"));
-    println!("  {}", cyan("└─────────────────────────────────────────────────────┘"));
+    println!(
+        "  {}        {}   |   {}   |   {}            {}",
+        c("│"),
+        style("v0.1.5").green(),
+        style("Rust").yellow(),
+        d("6.4MB"),
+        c("│")
+    );
+    println!(
+        "  {}                                                     {}",
+        c("│"),
+        c("│")
+    );
+    println!(
+        "  {}",
+        c("└─────────────────────────────────────────────────────┘")
+    );
     println!();
 }
 
@@ -267,115 +226,17 @@ fn print_section(title: &str) {
     println!();
 }
 
-fn select_provider() -> Result<ProviderPreset> {
-    print_section("选择服务商");
-
-    let _items: Vec<String> = PROVIDERS
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            format!(
-                "  {}. {}",
-                style(i + 1).green(),
-                style(p.name).white()
-            )
-        })
-        .collect();
-
-    let display_items: Vec<&str> = PROVIDERS.iter().map(|p| p.name).collect();
-
-    let idx = Select::new()
-        .with_prompt(format!("  {}", style("选择 API 提供商").bold()))
-        .items(&display_items)
-        .default(0)
-        .interact()
-        .context("选择提供商失败")?;
-
-    Ok(PROVIDERS[idx].clone())
-}
-
-fn resolve_base_url(provider: &ProviderPreset) -> Result<String> {
-    if provider.is_azure {
-        let resource: String = Input::new()
-            .with_prompt("  Azure 资源名称")
-            .interact_text()
-            .context("输入失败")?;
-        let deployment: String = Input::new()
-            .with_prompt("  Azure 部署名称")
-            .interact_text()
-            .context("输入失败")?;
-        return Ok(format!(
-            "https://{resource}.openai.azure.com/openai/deployments/{deployment}"
-        ));
-    }
-
-    if provider.base_url.is_empty() {
-        let url: String = Input::new()
-            .with_prompt("  API Base URL")
-            .interact_text()
-            .context("输入失败")?;
-        return Ok(url);
-    }
-
-    let url: String = Input::new()
-        .with_prompt("  API Base URL")
-        .default(provider.base_url.to_string())
-        .interact_text()
-        .context("输入失败")?;
-    Ok(url)
-}
-
-fn resolve_azure_version(provider: &ProviderPreset) -> Result<Option<String>> {
-    if !provider.is_azure {
-        return Ok(None);
-    }
-    let version: String = Input::new()
-        .with_prompt("  Azure API 版本")
-        .default("2024-12-01-preview".to_string())
-        .interact_text()
-        .context("输入失败")?;
-    Ok(Some(version))
-}
-
-fn collect_api_key(provider: &ProviderPreset) -> Result<String> {
-    if !provider.needs_key {
-        println!(
-            "  {} Ollama 无需 API Key",
-            style("ℹ").blue()
-        );
-        return Ok("sk-ollama".to_string());
-    }
-
-    let key = Password::new()
-        .with_prompt("  输入 API Key")
-        .interact()
-        .context("输入失败")?;
-
-    if key.trim().is_empty() {
-        anyhow::bail!("API Key 不能为空");
-    }
-    Ok(key)
-}
-
 /// Select a model from presets or custom input
 fn select_model(label: &str, default: &str) -> Result<String> {
-    // Build menu: presets + custom option
     let mut items: Vec<String> = BUILTIN_MODELS
         .iter()
         .map(|(id, desc)| format!("{} — {}", style(id).green(), style(desc).dim()))
         .collect();
     items.push(format!("{}", style("自定义模型 (手动输入)").yellow()));
 
-    // Find default index
     let default_idx = BUILTIN_MODELS
         .iter()
-        .position(|(id, _)| {
-            if default.is_empty() {
-                false
-            } else {
-                *id == default
-            }
-        })
+        .position(|(id, _)| *id == default)
         .unwrap_or(0);
 
     let idx = Select::new()
@@ -388,7 +249,6 @@ fn select_model(label: &str, default: &str) -> Result<String> {
     if idx < BUILTIN_MODELS.len() {
         Ok(BUILTIN_MODELS[idx].0.to_string())
     } else {
-        // Custom input
         let model: String = Input::new()
             .with_prompt("  输入模型名称")
             .interact_text()
@@ -407,7 +267,7 @@ fn select_reasoning(label: &str) -> Result<String> {
     let idx = Select::new()
         .with_prompt(format!("  {} 思考强度", style(label).bold()))
         .items(&items)
-        .default(0) // none
+        .default(0)
         .interact()
         .context("选择思考强度失败")?;
 
@@ -468,12 +328,11 @@ fn print_summary(config: &ProxyConfig, path: &std::path::Path) {
         config.host,
         style(config.port).white()
     );
-    println!();
     if let Some(ref key) = config.anthropic_api_key {
         println!(
             "  {} {}",
-            style("Auth:  ").dim(),
-            style(format!("已启用 (密钥: {})", key)).green()
+            style("鉴权密钥:").dim(),
+            style(key).green()
         );
     }
     println!();
@@ -484,7 +343,7 @@ fn print_summary(config: &ProxyConfig, path: &std::path::Path) {
     );
 }
 
-/// Generate a random auth key (hex string)
+/// Generate a random auth key
 fn generate_auth_key() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
