@@ -188,6 +188,7 @@ async fn test_connection(State(state): State<Arc<AppState>>) -> impl IntoRespons
         tools: None,
         tool_choice: None,
         stream_options: None,
+        reasoning_effort: None,
     };
 
     match state

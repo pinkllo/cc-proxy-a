@@ -63,6 +63,7 @@ pub fn claude_to_openai(req: &MessagesRequest, config: &ProxyConfig) -> ChatComp
         tools: None,
         tool_choice: None,
         stream_options: None,
+        reasoning_effort: None,
     };
 
     // Convert tools
@@ -92,6 +93,12 @@ pub fn claude_to_openai(req: &MessagesRequest, config: &ProxyConfig) -> ChatComp
     // Stream options
     if request.stream {
         request.stream_options = Some(StreamOptions { include_usage: true });
+    }
+
+    // Reasoning effort: Claude thinking → OpenAI reasoning_effort
+    let reasoning = resolve_reasoning_effort(req, config);
+    if let Some(effort) = reasoning {
+        request.reasoning_effort = Some(effort);
     }
 
     request
@@ -277,5 +284,34 @@ fn convert_tool_choice(choice: &serde_json::Value) -> serde_json::Value {
             }
         }
         _ => serde_json::json!("auto"),
+    }
+}
+
+/// Resolve reasoning effort: Claude thinking parameter + config fallback.
+///
+/// Priority:
+/// 1. If Claude request has `thinking: {enabled: true}`, map budget_tokens to effort level
+/// 2. If config has `reasoning_effort != "none"`, use that
+/// 3. Otherwise, return None (no reasoning)
+fn resolve_reasoning_effort(req: &MessagesRequest, config: &ProxyConfig) -> Option<String> {
+    // Check if Claude request explicitly enables thinking
+    if let Some(ref thinking) = req.thinking {
+        if thinking.enabled {
+            // Map based on config's reasoning_effort, or default to "medium"
+            let effort = if config.reasoning_effort != "none" {
+                config.reasoning_effort.clone()
+            } else {
+                "medium".to_string()
+            };
+            return Some(effort);
+        }
+    }
+
+    // Fall back to config-level reasoning_effort
+    let effort = &config.reasoning_effort;
+    if effort != "none" {
+        Some(effort.clone())
+    } else {
+        None
     }
 }

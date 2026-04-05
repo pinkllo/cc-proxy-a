@@ -34,6 +34,9 @@ pub struct ProxyConfig {
     pub request_timeout: u64,
     #[serde(default)]
     pub custom_headers: HashMap<String, String>,
+    /// Reasoning effort level for thinking models (none/low/medium/high/xhigh)
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
 }
 
 // Manual Debug impl to redact secrets (F14)
@@ -49,6 +52,7 @@ impl std::fmt::Debug for ProxyConfig {
             .field("port", &self.port)
             .field("anthropic_api_key", &self.anthropic_api_key.as_ref().map(|_| "[REDACTED]"))
             .field("log_level", &self.log_level)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -62,6 +66,7 @@ fn default_log_level() -> String { "info".into() }
 fn default_max_tokens() -> u32 { 4096 }
 fn default_min_tokens() -> u32 { 100 }
 fn default_timeout() -> u64 { 90 }
+fn default_reasoning_effort() -> String { "none".into() }
 
 impl ProxyConfig {
     /// Effective middle model (falls back to big_model)
@@ -105,6 +110,7 @@ impl ProxyConfig {
             request_timeout: env_or("REQUEST_TIMEOUT", &default_timeout().to_string())
                 .parse().unwrap_or(default_timeout()),
             custom_headers,
+            reasoning_effort: env_or("REASONING_EFFORT", &default_reasoning_effort()),
         })
     }
 

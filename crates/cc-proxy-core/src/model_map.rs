@@ -40,6 +40,7 @@ mod tests {
             min_tokens_limit: 100,
             request_timeout: 90,
             custom_headers: Default::default(),
+            reasoning_effort: "none".into(),
         }
     }
 

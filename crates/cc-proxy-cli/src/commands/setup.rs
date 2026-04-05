@@ -77,7 +77,7 @@ pub async fn run() -> Result<()> {
     let azure_api_version = resolve_azure_version(&provider)?;
     let api_key = collect_api_key(&provider)?;
     let (big, middle, small) = collect_models(&provider)?;
-    let (port, anthropic_key) = collect_optional()?;
+    let (port, anthropic_key, reasoning_effort) = collect_optional()?;
 
     let config = build_config(
         api_key,
@@ -88,6 +88,7 @@ pub async fn run() -> Result<()> {
         port,
         anthropic_key,
         azure_api_version,
+        reasoning_effort,
     );
 
     save_config(&config)?;
@@ -259,7 +260,7 @@ fn collect_models(provider: &ProviderPreset) -> Result<(String, String, String)>
 
 // ─── Step 4: Optional Settings ──────────────────────────────────────
 
-fn collect_optional() -> Result<(u16, Option<String>)> {
+fn collect_optional() -> Result<(u16, Option<String>, String)> {
     println!();
     println!("  {}", style("可选配置").bold().underlined());
 
@@ -268,6 +269,23 @@ fn collect_optional() -> Result<(u16, Option<String>)> {
         .default(8082u16)
         .interact_text()
         .context("输入端口失败")?;
+
+    // Reasoning effort
+    let reasoning_items = &["none (关闭)", "low", "medium", "high", "xhigh"];
+    let reasoning_idx = Select::new()
+        .with_prompt(format!("{}", style("思考模式 (Reasoning Effort)").bold()))
+        .items(reasoning_items)
+        .default(0)
+        .interact()
+        .context("选择思考模式失败")?;
+    let reasoning_effort = match reasoning_idx {
+        0 => "none",
+        1 => "low",
+        2 => "medium",
+        3 => "high",
+        4 => "xhigh",
+        _ => "none",
+    }.to_string();
 
     let want_auth = Confirm::new()
         .with_prompt("是否配置 ANTHROPIC_API_KEY (用于鉴权)")
@@ -285,7 +303,7 @@ fn collect_optional() -> Result<(u16, Option<String>)> {
         None
     };
 
-    Ok((port, anthropic_key))
+    Ok((port, anthropic_key, reasoning_effort))
 }
 
 // ─── Build Config ───────────────────────────────────────────────────
@@ -300,6 +318,7 @@ fn build_config(
     port: u16,
     anthropic_key: Option<String>,
     azure_api_version: Option<String>,
+    reasoning_effort: String,
 ) -> ProxyConfig {
     let middle_opt = if middle_model == big_model {
         None
@@ -322,6 +341,7 @@ fn build_config(
         min_tokens_limit: 100,
         request_timeout: 90,
         custom_headers: HashMap::new(),
+        reasoning_effort,
     }
 }
 
