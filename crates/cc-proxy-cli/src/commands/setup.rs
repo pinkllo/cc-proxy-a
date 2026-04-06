@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use console::style;
-use dialoguer::{Confirm, Input, Password, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use cc_proxy_core::config::ProxyConfig;
 
@@ -44,9 +44,9 @@ pub async fn run() -> Result<()> {
         .interact_text()
         .context("输入 URL 失败")?;
 
-    let api_key = Password::new()
+    let api_key: String = Input::new()
         .with_prompt("  API Key")
-        .interact()
+        .interact_text()
         .context("输入 Key 失败")?;
 
     if api_key.trim().is_empty() {
