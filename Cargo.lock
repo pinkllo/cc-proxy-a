@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "cc-proxy-cli"
-version = "0.1.0"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "cc-proxy-core",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "cc-proxy-core"
-version = "0.1.0"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-stream",
