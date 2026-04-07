@@ -5,7 +5,7 @@ pub async fn run() -> Result<()> {
     let config = load_config()?;
 
     // Print startup banner
-    println!("🚀 cc-proxy v0.1.3");
+    println!("🚀 cc-proxy v{}", env!("CARGO_PKG_VERSION"));
     println!("   Base URL:     {}", config.openai_base_url);
     println!(
         "   Big Model:    {} (reasoning: {})",

@@ -426,7 +426,7 @@ fn print_banner() {
     println!(
         "  {}        {}   |   {}   |   {}            {}",
         c("│"),
-        style("v0.1.9").green(),
+        style(format!("v{}", env!("CARGO_PKG_VERSION"))).green(),
         style("Rust").yellow(),
         d("6.4MB"),
         c("│")

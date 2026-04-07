@@ -259,7 +259,7 @@ async fn test_connection(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
 async fn root(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "message": "cc-proxy v0.1.0",
+        "message": format!("cc-proxy v{}", env!("CARGO_PKG_VERSION")),
         "status": "running",
         "config": {
             "openai_base_url": state.config.openai_base_url,
