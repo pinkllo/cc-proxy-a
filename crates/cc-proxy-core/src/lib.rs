@@ -5,4 +5,5 @@ pub mod convert;
 pub mod error;
 pub mod model_map;
 pub mod server;
+pub mod token_count;
 pub mod types;

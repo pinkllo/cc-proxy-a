@@ -112,7 +112,11 @@ pub async fn run() -> Result<()> {
         log_level: "info".to_string(),
         max_tokens_limit: 128000,
         min_tokens_limit: 100,
-        request_timeout: 300,
+        request_timeout: 600,
+        streaming_first_byte_timeout: 300,
+        streaming_idle_timeout: 300,
+        connect_timeout: 30,
+        token_count_scale: 0.5,
         custom_headers: HashMap::new(),
         reasoning_effort: "none".to_string(),
         big_reasoning: if big_reasoning == "none" {

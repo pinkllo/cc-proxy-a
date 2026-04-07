@@ -40,6 +40,22 @@ pub struct ProxyConfig {
     pub min_tokens_limit: u32,
     #[serde(default = "default_timeout")]
     pub request_timeout: u64,
+    /// Streaming first-byte timeout (seconds). Max wait for the first SSE chunk.
+    /// Claude extended thinking can be very long, default 300s.
+    #[serde(default = "default_streaming_first_byte_timeout")]
+    pub streaming_first_byte_timeout: u64,
+    /// Streaming idle timeout (seconds). Max gap between consecutive SSE chunks.
+    /// 0 = disabled. Default 300s.
+    #[serde(default = "default_streaming_idle_timeout")]
+    pub streaming_idle_timeout: u64,
+    /// TCP connect timeout (seconds). Default 30s.
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout: u64,
+    /// Token count scaling factor (0.0-1.0). Compensates for upstream tokenizer
+    /// inflating counts vs Claude's tokenizer due to format conversion overhead.
+    /// Default 0.5 (~2x inflation correction). Set 1.0 to disable.
+    #[serde(default = "default_token_count_scale")]
+    pub token_count_scale: f64,
     #[serde(default)]
     pub custom_headers: HashMap<String, String>,
     /// Global reasoning effort fallback (none/low/medium/high/xhigh)
@@ -100,7 +116,19 @@ fn default_min_tokens() -> u32 {
     100
 }
 fn default_timeout() -> u64 {
+    600
+}
+fn default_streaming_first_byte_timeout() -> u64 {
     300
+}
+fn default_streaming_idle_timeout() -> u64 {
+    300
+}
+fn default_connect_timeout() -> u64 {
+    30
+}
+fn default_token_count_scale() -> f64 {
+    0.5
 }
 fn default_reasoning_effort() -> String {
     "none".into()
@@ -163,6 +191,27 @@ impl ProxyConfig {
             request_timeout: env_or("REQUEST_TIMEOUT", &default_timeout().to_string())
                 .parse()
                 .unwrap_or(default_timeout()),
+            streaming_first_byte_timeout: env_or(
+                "STREAMING_FIRST_BYTE_TIMEOUT",
+                &default_streaming_first_byte_timeout().to_string(),
+            )
+            .parse()
+            .unwrap_or(default_streaming_first_byte_timeout()),
+            streaming_idle_timeout: env_or(
+                "STREAMING_IDLE_TIMEOUT",
+                &default_streaming_idle_timeout().to_string(),
+            )
+            .parse()
+            .unwrap_or(default_streaming_idle_timeout()),
+            connect_timeout: env_or("CONNECT_TIMEOUT", &default_connect_timeout().to_string())
+                .parse()
+                .unwrap_or(default_connect_timeout()),
+            token_count_scale: env_or(
+                "TOKEN_COUNT_SCALE",
+                &default_token_count_scale().to_string(),
+            )
+            .parse()
+            .unwrap_or(default_token_count_scale()),
             custom_headers,
             reasoning_effort: env_or("REASONING_EFFORT", &default_reasoning_effort()),
             big_reasoning: std::env::var("BIG_REASONING")

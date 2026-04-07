@@ -5,6 +5,7 @@ use crate::types::openai::ChatCompletionResponse;
 pub fn openai_to_claude(
     response: &ChatCompletionResponse,
     original_model: &str,
+    estimated_input_tokens: u32,
 ) -> MessagesResponse {
     let choice = response.choices.first();
     let message = choice.map(|c| &c.message);
@@ -67,13 +68,33 @@ pub fn openai_to_claude(
     let usage = response
         .usage
         .as_ref()
-        .map(|u| Usage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cache_read_input_tokens: u
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens),
+        .map(|u| {
+            // Use min(tiktoken, upstream) to avoid over-reporting.
+            let report_input = if estimated_input_tokens > 0 && u.prompt_tokens > 0 {
+                estimated_input_tokens.min(u.prompt_tokens)
+            } else if estimated_input_tokens > 0 {
+                estimated_input_tokens
+            } else {
+                u.prompt_tokens
+            };
+            let cache_ratio = if u.prompt_tokens > 0 {
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
+                    .unwrap_or(0) as f64
+                    / u.prompt_tokens as f64
+            } else {
+                0.0
+            };
+            Usage {
+                input_tokens: report_input,
+                output_tokens: u.completion_tokens,
+                cache_read_input_tokens: if cache_ratio > 0.0 {
+                    Some((report_input as f64 * cache_ratio).round() as u32)
+                } else {
+                    None
+                },
+            }
         })
         .unwrap_or_default();
 
@@ -114,7 +135,7 @@ mod tests {
             }),
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
 
         assert_eq!(result.id, "chatcmpl-abc");
         assert_eq!(result.response_type, "message");
@@ -157,7 +178,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
 
         // Must be "tool_use" regardless of the OpenAI finish_reason value
         assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
@@ -195,7 +216,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
         assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(result.content.len(), 2); // text + tool_use
     }
@@ -210,7 +231,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
 
         // Should produce at least one empty text block as fallback
         assert_eq!(result.content.len(), 1);
@@ -244,7 +265,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
         match &result.content[0] {
             claude::ResponseContentBlock::ToolUse { input, .. } => {
                 // Should fall back to {"raw_arguments": "not valid json {{{"}
@@ -276,10 +297,11 @@ mod tests {
             }),
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
-        assert_eq!(result.usage.input_tokens, 500);
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
+        assert_eq!(result.usage.input_tokens, 10); // estimated, not upstream's 500
         assert_eq!(result.usage.output_tokens, 100);
-        assert_eq!(result.usage.cache_read_input_tokens, Some(300));
+        // cache_ratio = 300/500 = 0.6, applied to estimated 10 → 6
+        assert_eq!(result.usage.cache_read_input_tokens, Some(6));
     }
 
     #[test]
@@ -300,8 +322,8 @@ mod tests {
             }),
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
-        assert_eq!(result.usage.input_tokens, 50);
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
+        assert_eq!(result.usage.input_tokens, 10); // estimated, not upstream's 50
         assert_eq!(result.usage.output_tokens, 25);
         assert!(result.usage.cache_read_input_tokens.is_none());
     }
@@ -320,7 +342,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
         assert_eq!(result.usage.input_tokens, 0);
         assert_eq!(result.usage.output_tokens, 0);
     }
@@ -341,7 +363,7 @@ mod tests {
             usage: None,
         };
 
-        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022");
+        let result = openai_to_claude(&response, "claude-3-5-sonnet-20241022", 10);
         assert_eq!(result.stop_reason.as_deref(), Some("max_tokens"));
     }
 }

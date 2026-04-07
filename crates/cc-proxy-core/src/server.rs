@@ -7,6 +7,7 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -29,9 +30,11 @@ pub fn create_router(state: AppState) -> Router {
     let auth_key = state.config.anthropic_api_key.clone();
 
     // Authenticated routes (Claude API endpoints)
+    // NOTE: count_tokens intentionally NOT registered — let Claude Code
+    // fall back to its own internal tokenizer (more accurate than any
+    // proxy-side estimate). cc-switch also omits this endpoint.
     let api_routes = Router::new()
         .route("/v1/messages", post(create_message))
-        .route("/v1/messages/count_tokens", post(count_tokens))
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(Extension(auth_key));
 
@@ -97,22 +100,51 @@ async fn create_message(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MessagesRequest>,
 ) -> Result<impl IntoResponse, ProxyError> {
-    tracing::debug!(model = %request.model, stream = ?request.stream, "Processing request");
+    // Precise token counting using tiktoken BPE tokenizer (same family as OpenAI).
+    // Counts from the ORIGINAL Claude-format request before OpenAI conversion,
+    // giving Claude Code accurate context window tracking.
+    let estimated_input_tokens = crate::token_count::count_request_tokens(&request);
+    let msg_count = request.messages.len();
+    tracing::info!(
+        model = %request.model,
+        stream = ?request.stream,
+        messages = msg_count,
+        tiktoken_input = estimated_input_tokens,
+        max_tokens = request.max_tokens,
+        "→ request"
+    );
 
     let openai_request = convert::request::claude_to_openai(&request, &state.config);
 
     if request.stream.unwrap_or(false) {
-        // Streaming response
+        // Streaming response — with per-chunk timeout protection
+        let first_byte_timeout =
+            Duration::from_secs(state.config.streaming_first_byte_timeout);
+        let idle_timeout = Duration::from_secs(state.config.streaming_idle_timeout);
+
         let event_stream = state
             .client
-            .chat_completion_stream(&openai_request, &state.config.openai_api_key)
+            .chat_completion_stream(
+                &openai_request,
+                &state.config.openai_api_key,
+                first_byte_timeout,
+                idle_timeout,
+            )
             .await?;
 
-        let claude_stream =
-            convert::stream::openai_stream_to_claude(event_stream, request.model.clone());
+        let claude_stream = convert::stream::openai_stream_to_claude(
+            event_stream,
+            request.model.clone(),
+            idle_timeout,
+            estimated_input_tokens,
+        );
 
         Ok(Sse::new(claude_stream)
-            .keep_alive(axum::response::sse::KeepAlive::default())
+            .keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
             .into_response())
     } else {
         // Non-streaming response
@@ -121,12 +153,17 @@ async fn create_message(
             .chat_completion(&openai_request, &state.config.openai_api_key)
             .await?;
 
-        let claude_response = convert::response::openai_to_claude(&openai_response, &request.model);
+        let claude_response = convert::response::openai_to_claude(
+            &openai_response,
+            &request.model,
+            estimated_input_tokens,
+        );
 
         Ok(Json(claude_response).into_response())
     }
 }
 
+#[allow(dead_code)]
 async fn count_tokens(Json(request): Json<TokenCountRequest>) -> Json<serde_json::Value> {
     let mut total_chars: usize = 0;
 
@@ -157,7 +194,18 @@ async fn count_tokens(Json(request): Json<TokenCountRequest>) -> Json<serde_json
         }
     }
 
-    let estimated_tokens = (total_chars / 4).max(1);
+    // More accurate estimate: ~2.5 chars per token for mixed English/code content,
+    // plus overhead for message formatting (~4 tokens per message).
+    let msg_overhead = request.messages.len() * 4;
+    let estimated_tokens = ((total_chars as f64 / 2.5) as usize + msg_overhead).max(1);
+
+    tracing::info!(
+        total_chars = total_chars,
+        messages = request.messages.len(),
+        estimated_tokens = estimated_tokens,
+        "count_tokens"
+    );
+
     Json(serde_json::json!({ "input_tokens": estimated_tokens }))
 }
 

@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 
 use futures::stream::{Stream, StreamExt};
+use tokio::time::timeout;
 
 use crate::config::ProxyConfig;
 use crate::convert::stream::{OpenAiSseEvent, StreamError};
@@ -32,6 +33,9 @@ impl UpstreamClient {
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.request_timeout))
+            .connect_timeout(Duration::from_secs(config.connect_timeout))
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_max_idle_per_host(10)
             .default_headers(default_headers)
             .build()
             .map_err(|e| ProxyError::Internal(format!("Failed to create HTTP client: {e}")))?;
@@ -74,6 +78,8 @@ impl UpstreamClient {
         &self,
         request: &ChatCompletionRequest,
         api_key: &str,
+        first_byte_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<impl Stream<Item = Result<OpenAiSseEvent, StreamError>> + Send, ProxyError> {
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -92,27 +98,67 @@ impl UpstreamClient {
             return Err(ProxyError::Internal(msg));
         }
 
-        // Parse the SSE byte stream into OpenAiSseEvent
+        // Parse the SSE byte stream into OpenAiSseEvent with per-chunk timeouts
         let byte_stream = response.bytes_stream();
-        let event_stream = parse_sse_stream(byte_stream);
+        let event_stream = parse_sse_stream(byte_stream, first_byte_timeout, idle_timeout);
 
         Ok(event_stream)
     }
 }
 
-/// Parse a raw byte stream (from reqwest) into OpenAiSseEvent items
+/// Maximum SSE buffer size (4 MB) to prevent unbounded memory growth.
+const MAX_SSE_BUFFER: usize = 4 * 1024 * 1024;
+
+/// Parse a raw byte stream (from reqwest) into OpenAiSseEvent items.
+///
+/// Each chunk read is wrapped in `tokio::time::timeout` to prevent indefinite
+/// blocking when the upstream pauses (e.g. during extended thinking).
 fn parse_sse_stream(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    first_byte_timeout: Duration,
+    idle_timeout: Duration,
 ) -> impl Stream<Item = Result<OpenAiSseEvent, StreamError>> + Send {
     // Accumulate raw bytes to avoid UTF-8 boundary corruption (F17)
     let line_stream = async_stream::stream! {
         let mut raw_buffer = Vec::<u8>::new();
+        let mut is_first_chunk = true;
 
         tokio::pin!(byte_stream);
-        while let Some(chunk_result) = byte_stream.next().await {
+        loop {
+            // Pick the right timeout: first-byte for the initial chunk, idle for subsequent ones.
+            let timeout_dur = if is_first_chunk { first_byte_timeout } else { idle_timeout };
+
+            let chunk_result = if timeout_dur.is_zero() {
+                // Timeout of 0 = disabled, wait indefinitely (backward-compat).
+                byte_stream.next().await
+            } else {
+                match timeout(timeout_dur, byte_stream.next()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let kind = if is_first_chunk { "first-byte" } else { "idle" };
+                        tracing::error!(
+                            "SSE stream {kind} timeout after {}s",
+                            timeout_dur.as_secs()
+                        );
+                        yield Err(StreamError::Connection(
+                            format!("stream {kind} timeout ({}s)", timeout_dur.as_secs()),
+                        ));
+                        return;
+                    }
+                }
+            };
+
             match chunk_result {
-                Ok(bytes) => {
+                Some(Ok(bytes)) => {
+                    is_first_chunk = false;
                     raw_buffer.extend_from_slice(&bytes);
+
+                    // Buffer overflow protection
+                    if raw_buffer.len() > MAX_SSE_BUFFER {
+                        tracing::error!("SSE buffer exceeded {} bytes, aborting stream", MAX_SSE_BUFFER);
+                        yield Err(StreamError::Connection("SSE buffer overflow".into()));
+                        return;
+                    }
 
                     // Process complete lines (delimited by \n)
                     while let Some(pos) = raw_buffer.iter().position(|&b| b == b'\n') {
@@ -146,8 +192,12 @@ fn parse_sse_stream(
                         }
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     yield Err(StreamError::Connection(e.to_string()));
+                    return;
+                }
+                None => {
+                    // Stream ended normally.
                     return;
                 }
             }

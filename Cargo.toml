@@ -57,6 +57,9 @@ bytes = "1"
 # Home directory
 dirs = "5"
 
+# Token counting (BPE tokenizer, same as OpenAI tiktoken)
+tiktoken-rs = "0.9"
+
 # TUI interactive prompts
 dialoguer = "0.11"
 console = "0.15"

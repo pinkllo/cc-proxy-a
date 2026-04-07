@@ -7,11 +7,13 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Duration;
 
 use axum::response::sse::Event;
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::json;
+use tokio::time::timeout;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -93,6 +95,12 @@ struct ConverterState<S> {
 
     /// Phases: Prologue -> Streaming -> Epilogue -> Done
     phase: Phase,
+
+    /// Idle timeout for waiting on upstream chunks. Zero = disabled.
+    idle_timeout: Duration,
+    /// Pre-computed Claude-equivalent input token estimate from original request chars.
+    /// Used instead of upstream's inflated input_tokens.
+    estimated_input_tokens: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -119,6 +127,8 @@ enum Phase {
 pub fn openai_stream_to_claude(
     upstream: impl Stream<Item = Result<OpenAiSseEvent, StreamError>> + Send + 'static,
     original_model: String,
+    idle_timeout: Duration,
+    estimated_input_tokens: u32,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> + Send {
     let message_id = generate_message_id();
 
@@ -132,6 +142,8 @@ pub fn openai_stream_to_claude(
         final_stop_reason: stop_reason::END_TURN.to_string(),
         usage: Usage::default(),
         phase: Phase::Prologue,
+        idle_timeout,
+        estimated_input_tokens,
     };
 
     // We collect events into a VecDeque because a single upstream chunk can
@@ -153,7 +165,30 @@ pub fn openai_stream_to_claude(
                         // Loop back to drain buffer.
                     }
                     Phase::Streaming => {
-                        match state.upstream.next().await {
+                        // Wrap upstream read with idle timeout to prevent indefinite blocking.
+                        let next = if state.idle_timeout.is_zero() {
+                            state.upstream.next().await
+                        } else {
+                            match timeout(state.idle_timeout, state.upstream.next()).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    error!(
+                                        "converter stream idle timeout ({}s)",
+                                        state.idle_timeout.as_secs()
+                                    );
+                                    emit_error_event(
+                                        &format!(
+                                            "stream idle timeout ({}s)",
+                                            state.idle_timeout.as_secs()
+                                        ),
+                                        &mut buf,
+                                    );
+                                    state.phase = Phase::Epilogue;
+                                    continue;
+                                }
+                            }
+                        };
+                        match next {
                             Some(Ok(OpenAiSseEvent::Chunk(chunk))) => {
                                 process_chunk(&mut state, &chunk, &mut buf);
                                 // Loop back to drain buffer.
@@ -226,6 +261,8 @@ fn emit_prologue(state: &ConverterState<impl Stream>, buf: &mut std::collections
     // 3. ping
     let ping_data = json!({ "type": sse::PING });
     buf.push_back(make_sse(sse::PING, &ping_data));
+
+    debug!("prologue emitted for model={}", state.original_model);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +386,14 @@ fn process_chunk(
 // ---------------------------------------------------------------------------
 
 fn emit_epilogue(state: &ConverterState<impl Stream>, buf: &mut std::collections::VecDeque<Event>) {
+    warn!(
+        "← stream done | input_tokens={} output_tokens={} cache_read={} stop={}",
+        state.usage.input_tokens,
+        state.usage.output_tokens,
+        state.usage.cache_read_input_tokens.unwrap_or(0),
+        state.final_stop_reason,
+    );
+
     // 1. content_block_stop for the text block.
     let text_stop = json!({
         "type": sse::CONTENT_BLOCK_STOP,
@@ -381,10 +426,29 @@ fn emit_epilogue(state: &ConverterState<impl Stream>, buf: &mut std::collections
     };
 
     // 3. message_delta with stop_reason and usage.
+    // Use the MINIMUM of tiktoken estimate and upstream count.
+    // tiktoken counts the original content; upstream counts after format conversion.
+    // Taking the min avoids both over-reporting and under-reporting.
+    let report_input = if state.estimated_input_tokens > 0 && state.usage.input_tokens > 0 {
+        state.estimated_input_tokens.min(state.usage.input_tokens)
+    } else if state.estimated_input_tokens > 0 {
+        state.estimated_input_tokens
+    } else {
+        state.usage.input_tokens
+    };
+    let report_output = state.usage.output_tokens;
+    // Preserve cache ratio from upstream.
+    let cache_ratio = if state.usage.input_tokens > 0 {
+        state.usage.cache_read_input_tokens.unwrap_or(0) as f64
+            / state.usage.input_tokens as f64
+    } else {
+        0.0
+    };
+    let report_cache = (report_input as f64 * cache_ratio).round() as u32;
     let usage_data = json!({
-        "input_tokens": state.usage.input_tokens,
-        "output_tokens": state.usage.output_tokens,
-        "cache_read_input_tokens": state.usage.cache_read_input_tokens.unwrap_or(0)
+        "input_tokens": report_input,
+        "output_tokens": report_output,
+        "cache_read_input_tokens": report_cache
     });
     let message_delta = json!({
         "type": sse::MESSAGE_DELTA,
@@ -458,6 +522,7 @@ mod tests {
     use super::*;
     use crate::types::openai::*;
     use futures::stream;
+    use std::time::Duration;
 
     /// Helper to collect all events from the converter.
     async fn collect_events(
@@ -465,7 +530,7 @@ mod tests {
         model: &str,
     ) -> Vec<Event> {
         let upstream = stream::iter(events);
-        let output = openai_stream_to_claude(upstream, model.to_string());
+        let output = openai_stream_to_claude(upstream, model.to_string(), Duration::ZERO, 0);
         futures::pin_mut!(output);
         let mut results = Vec::new();
         while let Some(Ok(event)) = output.next().await {
