@@ -439,7 +439,7 @@ fn print_banner() {
     println!(
         "  {}        {}   |   {}   |   {}            {}",
         c("│"),
-        style("v0.1.8").green(),
+        style("v0.1.9").green(),
         style("Rust").yellow(),
         d("6.4MB"),
         c("│")

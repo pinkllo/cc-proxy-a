@@ -94,13 +94,13 @@ fn default_log_level() -> String {
     "info".into()
 }
 fn default_max_tokens() -> u32 {
-    4096
+    128000
 }
 fn default_min_tokens() -> u32 {
     100
 }
 fn default_timeout() -> u64 {
-    90
+    300
 }
 fn default_reasoning_effort() -> String {
     "none".into()

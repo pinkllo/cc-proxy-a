@@ -110,9 +110,9 @@ pub async fn run() -> Result<()> {
         anthropic_api_key: Some(anthropic_key),
         azure_api_version: None,
         log_level: "info".to_string(),
-        max_tokens_limit: 4096,
+        max_tokens_limit: 128000,
         min_tokens_limit: 100,
-        request_timeout: 90,
+        request_timeout: 300,
         custom_headers: HashMap::new(),
         reasoning_effort: "none".to_string(),
         big_reasoning: if big_reasoning == "none" {

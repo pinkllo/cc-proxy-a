@@ -365,9 +365,9 @@ mod tests {
             anthropic_api_key: None,
             azure_api_version: None,
             log_level: "info".into(),
-            max_tokens_limit: 4096,
+            max_tokens_limit: 128000,
             min_tokens_limit: 100,
-            request_timeout: 90,
+            request_timeout: 300,
             custom_headers: Default::default(),
             reasoning_effort: "none".into(),
             big_reasoning: None,
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_max_tokens_clamped_to_min() {
-        let config = test_config(); // min=100, max=4096
+        let config = test_config(); // min=100, max=128000
         let mut req = base_request();
         req.max_tokens = 10; // Below min
         let result = claude_to_openai(&req, &config);
@@ -676,11 +676,11 @@ mod tests {
 
     #[test]
     fn test_max_tokens_clamped_to_max() {
-        let config = test_config(); // min=100, max=4096
+        let config = test_config(); // min=100, max=128000
         let mut req = base_request();
-        req.max_tokens = 99999; // Above max
+        req.max_tokens = 999999; // Above max
         let result = claude_to_openai(&req, &config);
-        assert_eq!(result.max_tokens, 4096);
+        assert_eq!(result.max_tokens, 128000);
     }
 
     #[test]
