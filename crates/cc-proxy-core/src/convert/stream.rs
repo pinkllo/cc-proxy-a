@@ -439,8 +439,7 @@ fn emit_epilogue(state: &ConverterState<impl Stream>, buf: &mut std::collections
     let report_output = state.usage.output_tokens;
     // Preserve cache ratio from upstream.
     let cache_ratio = if state.usage.input_tokens > 0 {
-        state.usage.cache_read_input_tokens.unwrap_or(0) as f64
-            / state.usage.input_tokens as f64
+        state.usage.cache_read_input_tokens.unwrap_or(0) as f64 / state.usage.input_tokens as f64
     } else {
         0.0
     };

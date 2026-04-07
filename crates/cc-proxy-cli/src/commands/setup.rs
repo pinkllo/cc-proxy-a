@@ -333,11 +333,7 @@ fn print_summary(config: &ProxyConfig, path: &std::path::Path) {
         style(config.port).white()
     );
     if let Some(ref key) = config.anthropic_api_key {
-        println!(
-            "  {} {}",
-            style("鉴权密钥:").dim(),
-            style(key).green()
-        );
+        println!("  {} {}", style("鉴权密钥:").dim(), style(key).green());
     }
     println!();
     println!(

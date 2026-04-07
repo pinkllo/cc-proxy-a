@@ -123,11 +123,7 @@ async fn interactive_menu() -> anyhow::Result<()> {
                 ));
                 actions.push("cc-disconnect");
             } else {
-                items.push(mi(
-                    "⚡",
-                    "接入 Claude Code",
-                    "一键写入 settings.json",
-                ));
+                items.push(mi("⚡", "接入 Claude Code", "一键写入 settings.json"));
                 actions.push("cc-connect");
             }
 
@@ -137,7 +133,11 @@ async fn interactive_menu() -> anyhow::Result<()> {
             items.push(mi(
                 "📊",
                 "查看状态",
-                if proxy_running { "运行中" } else { "已停止" },
+                if proxy_running {
+                    "运行中"
+                } else {
+                    "已停止"
+                },
             ));
             actions.push("status");
 
@@ -164,11 +164,7 @@ async fn interactive_menu() -> anyhow::Result<()> {
         items.push(mi("Q", "退出", ""));
         actions.push("quit");
 
-        let default_idx = if !has_config {
-            items.len() - 2
-        } else {
-            0
-        };
+        let default_idx = if !has_config { items.len() - 2 } else { 0 };
 
         let selection = Select::new()
             .with_prompt(format!("  {}", style("选择操作").bold()))
@@ -239,10 +235,7 @@ fn connect_claude_code() {
                 "  {} Claude Code 已配置为使用 cc-proxy",
                 style("✔").green().bold()
             );
-            println!(
-                "  {} 已写入 ~/.claude/settings.json",
-                style("  ").dim()
-            );
+            println!("  {} 已写入 ~/.claude/settings.json", style("  ").dim());
             println!();
             println!(
                 "  {} 直接运行 {} 即可使用代理",
@@ -251,10 +244,7 @@ fn connect_claude_code() {
             );
         }
         Err(e) => {
-            println!(
-                "  {} 配置 Claude Code 失败: {e}",
-                style("✗").red().bold()
-            );
+            println!("  {} 配置 Claude Code 失败: {e}", style("✗").red().bold());
         }
     }
 }
@@ -266,10 +256,7 @@ fn disconnect_claude_code() {
                 "  {} 已从 Claude Code 移除代理配置",
                 style("✔").green().bold()
             );
-            println!(
-                "  {} Claude Code 将恢复使用官方 API",
-                style("  ").dim()
-            );
+            println!("  {} Claude Code 将恢复使用官方 API", style("  ").dim());
         }
         Err(e) => {
             println!("  {} 移除配置失败: {e}", style("✗").red().bold());

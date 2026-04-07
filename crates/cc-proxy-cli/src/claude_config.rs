@@ -62,16 +62,12 @@ pub fn configure(port: u16, auth_key: &str) -> Result<()> {
         "ANTHROPIC_BASE_URL".into(),
         serde_json::json!(format!("http://localhost:{port}")),
     );
-    env.insert(
-        "ANTHROPIC_API_KEY".into(),
-        serde_json::json!(auth_key),
-    );
+    env.insert("ANTHROPIC_API_KEY".into(), serde_json::json!(auth_key));
     // Clear auth token to force API key mode (avoids auth conflict)
     env.insert("ANTHROPIC_AUTH_TOKEN".into(), serde_json::json!(""));
 
     // Write back
-    let content = serde_json::to_string_pretty(&settings)
-        .context("序列化 settings.json 失败")?;
+    let content = serde_json::to_string_pretty(&settings).context("序列化 settings.json 失败")?;
     std::fs::write(&path, content).context("写入 settings.json 失败")?;
 
     Ok(())
@@ -103,10 +99,7 @@ pub fn unconfigure() -> Result<()> {
 /// Print current Claude Code proxy config status
 pub fn print_status() {
     if !claude_code_installed() {
-        println!(
-            "  {} Claude Code settings.json 不存在",
-            style("⚠").yellow()
-        );
+        println!("  {} Claude Code settings.json 不存在", style("⚠").yellow());
         return;
     }
 
@@ -116,9 +109,6 @@ pub fn print_status() {
             style("✔").green().bold()
         );
     } else {
-        println!(
-            "  {} Claude Code 尚未配置使用 cc-proxy",
-            style("○").dim()
-        );
+        println!("  {} Claude Code 尚未配置使用 cc-proxy", style("○").dim());
     }
 }

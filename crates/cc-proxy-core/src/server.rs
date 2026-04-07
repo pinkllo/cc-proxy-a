@@ -118,8 +118,7 @@ async fn create_message(
 
     if request.stream.unwrap_or(false) {
         // Streaming response — with per-chunk timeout protection
-        let first_byte_timeout =
-            Duration::from_secs(state.config.streaming_first_byte_timeout);
+        let first_byte_timeout = Duration::from_secs(state.config.streaming_first_byte_timeout);
         let idle_timeout = Duration::from_secs(state.config.streaming_idle_timeout);
 
         let event_stream = state
