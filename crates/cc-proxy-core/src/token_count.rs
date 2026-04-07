@@ -53,13 +53,11 @@ pub fn count_request_tokens(request: &MessagesRequest) -> u32 {
                             segments.push(name);
                             // Tool input JSON counted via owned_segments below
                         }
-                        ContentBlock::ToolResult { content, .. } => {
-                            if let Some(ref c) = content {
-                                match c {
-                                    ToolResultContent::Text(s) => segments.push(s),
-                                    _ => {}
-                                }
-                            }
+                        ContentBlock::ToolResult {
+                            content: Some(ToolResultContent::Text(s)),
+                            ..
+                        } => {
+                            segments.push(s);
                         }
                         _ => {}
                     }
