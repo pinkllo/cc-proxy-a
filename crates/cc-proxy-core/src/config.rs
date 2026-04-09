@@ -51,6 +51,7 @@ pub struct ProxyConfig {
     /// TCP connect timeout (seconds). Default 30s.
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout: u64,
+
     /// Token count scaling factor (0.0-1.0). Compensates for upstream tokenizer
     /// inflating counts vs Claude's tokenizer due to format conversion overhead.
     /// Default 0.5 (~2x inflation correction). Set 1.0 to disable.
@@ -68,6 +69,18 @@ pub struct ProxyConfig {
     pub middle_reasoning: Option<String>,
     #[serde(default)]
     pub small_reasoning: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<String>,
+    #[serde(default)]
+    pub model_pricing: HashMap<String, ModelPricing>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPricing {
+    pub input_cost_per_million: f64,
+    pub output_cost_per_million: f64,
+    #[serde(default)]
+    pub cache_read_cost_per_million: Option<f64>,
 }
 
 // Manual Debug impl to redact secrets (F14)
@@ -86,7 +99,10 @@ impl std::fmt::Debug for ProxyConfig {
                 &self.anthropic_api_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("log_level", &self.log_level)
+
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("prompt_cache_retention", &self.prompt_cache_retention)
+            .field("model_pricing", &self.model_pricing)
             .finish()
     }
 }
@@ -127,6 +143,7 @@ fn default_streaming_idle_timeout() -> u64 {
 fn default_connect_timeout() -> u64 {
     30
 }
+
 fn default_token_count_scale() -> f64 {
     0.5
 }
@@ -149,6 +166,12 @@ impl ProxyConfig {
             ModelTier::Small => self.small_reasoning.as_deref(),
         };
         per_tier.unwrap_or(&self.reasoning_effort)
+    }
+
+    pub fn supports_openai_responses_features(&self) -> bool {
+        let base_url = self.openai_base_url.to_ascii_lowercase();
+        base_url.starts_with("https://api.openai.com")
+            || base_url.starts_with("http://api.openai.com")
     }
 
     /// Load config: env vars > .env > config.json > defaults
@@ -206,6 +229,7 @@ impl ProxyConfig {
             connect_timeout: env_or("CONNECT_TIMEOUT", &default_connect_timeout().to_string())
                 .parse()
                 .unwrap_or(default_connect_timeout()),
+
             token_count_scale: env_or(
                 "TOKEN_COUNT_SCALE",
                 &default_token_count_scale().to_string(),
@@ -223,6 +247,10 @@ impl ProxyConfig {
             small_reasoning: std::env::var("SMALL_REASONING")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            prompt_cache_retention: std::env::var("PROMPT_CACHE_RETENTION")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            model_pricing: HashMap::new(),
         })
     }
 

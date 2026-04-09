@@ -79,7 +79,7 @@ async fn test_via_proxy(port: u16) -> Result<()> {
 /// 直接向上游 API 发送测试请求
 async fn test_upstream_direct(config: &ProxyConfig) -> Result<()> {
     let base_url = config.openai_base_url.trim_end_matches('/');
-    let url = format!("{base_url}/chat/completions");
+    let url = format!("{base_url}/responses");
     let model = &config.small_model;
 
     println!("直接向上游 API 发送测试请求...");
@@ -92,10 +92,15 @@ async fn test_upstream_direct(config: &ProxyConfig) -> Result<()> {
 
     let payload = serde_json::json!({
         "model": model,
-        "messages": [
-            { "role": "user", "content": "Hello" }
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "Hello" }
+                ]
+            }
         ],
-        "max_tokens": 5,
+        "max_output_tokens": 5,
         "temperature": 0.0,
         "stream": false
     });
@@ -117,7 +122,7 @@ async fn test_upstream_direct(config: &ProxyConfig) -> Result<()> {
                 let body: serde_json::Value = response.json().await.unwrap_or_default();
                 let resp_id = body.get("id").and_then(|v| v.as_str()).unwrap_or("-");
                 let reply = body
-                    .pointer("/choices/0/message/content")
+                    .pointer("/output/0/content/0/text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-");
 

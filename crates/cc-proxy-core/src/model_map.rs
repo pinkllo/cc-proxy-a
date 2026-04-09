@@ -75,6 +75,8 @@ mod tests {
             big_reasoning: None,
             middle_reasoning: None,
             small_reasoning: None,
+            prompt_cache_retention: None,
+            model_pricing: Default::default(),
         }
     }
 

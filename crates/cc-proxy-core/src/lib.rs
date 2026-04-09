@@ -1,9 +1,16 @@
+pub mod admin;
 pub mod auth;
+pub mod claude;
 pub mod client;
 pub mod config;
 pub mod convert;
 pub mod error;
+pub mod history;
 pub mod model_map;
+pub mod request_log;
+pub mod runtime;
 pub mod server;
+pub mod session;
+pub mod stats;
 pub mod token_count;
 pub mod types;

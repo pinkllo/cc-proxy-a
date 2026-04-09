@@ -31,6 +31,10 @@ pub async fn run() -> Result<()> {
             "disabled"
         }
     );
+    println!(
+        "   Dashboard:    http://127.0.0.1:{}/dashboard",
+        config.port
+    );
     println!();
 
     cc_proxy_core::server::serve(config).await?;

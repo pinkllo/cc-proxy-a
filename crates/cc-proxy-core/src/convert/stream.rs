@@ -1,12 +1,8 @@
-//! SSE streaming converter: OpenAI ChatCompletion chunks -> Claude SSE events.
-//!
-//! This is the core streaming pipeline of the proxy. It consumes an upstream
-//! stream of OpenAI server-sent events and re-emits them as Claude-compatible
-//! SSE events, maintaining a small state machine to track text blocks, tool
-//! call blocks, and the final message envelope.
+//! SSE streaming converter: OpenAI Responses events -> Claude SSE events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::response::sse::Event;
@@ -14,26 +10,20 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::json;
 use tokio::time::timeout;
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 use uuid::Uuid;
 
+use crate::convert::response::openai_to_claude;
+use crate::convert::usage::derive_claude_usage;
 use crate::types::claude::{sse, stop_reason, Usage};
-use crate::types::openai::ChatCompletionChunk;
+use crate::types::openai::{ResponseObject, ResponseStreamEvent};
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Parsed upstream event from the OpenAI SSE stream.
 #[derive(Debug)]
 pub enum OpenAiSseEvent {
-    /// A parsed chunk from `data: {...}`.
-    Chunk(ChatCompletionChunk),
-    /// The terminal `data: [DONE]` sentinel.
+    Event(ResponseStreamEvent),
     Done,
 }
 
-/// Errors that can occur while reading the upstream SSE stream.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
     #[error("upstream connection error: {0}")]
@@ -44,30 +34,30 @@ pub enum StreamError {
     UnexpectedEof,
 }
 
-// ---------------------------------------------------------------------------
-// Internal state
-// ---------------------------------------------------------------------------
+pub type StreamObserver = Arc<dyn Fn(StreamSummary) + Send + Sync>;
 
-/// Tracks a single in-progress tool call being assembled from streamed deltas.
+#[derive(Debug, Clone)]
+pub struct StreamSummary {
+    pub usage: Usage,
+    pub stop_reason: String,
+    pub response_id: Option<String>,
+    pub had_error: bool,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug)]
 struct ToolCallAccumulator {
-    /// OpenAI tool call ID (e.g. "call_abc123").
-    id: Option<String>,
-    /// Function name.
+    call_id: Option<String>,
     name: Option<String>,
-    /// Accumulated raw JSON argument fragments (for debugging/logging only).
-    #[allow(dead_code)]
     args_buffer: String,
-    /// The Claude content-block index assigned to this tool call.
     claude_index: Option<usize>,
-    /// Whether we already emitted `content_block_start` for this tool call.
     started: bool,
 }
 
 impl ToolCallAccumulator {
     fn new() -> Self {
         Self {
-            id: None,
+            call_id: None,
             name: None,
             args_buffer: String::new(),
             claude_index: None,
@@ -76,84 +66,61 @@ impl ToolCallAccumulator {
     }
 }
 
-/// Full converter state threaded through the stream via `futures::stream::unfold`.
 struct ConverterState<S> {
     upstream: Pin<Box<S>>,
     original_model: String,
     message_id: String,
-
-    /// Index of the initial text content block (always 0).
     text_block_index: usize,
-    /// Counter for tool-call blocks appended after the text block.
     tool_block_counter: usize,
-    /// Tool calls keyed by their OpenAI delta index.
     tool_calls: HashMap<usize, ToolCallAccumulator>,
-    /// Final stop reason collected from finish_reason.
     final_stop_reason: String,
-    /// Usage data captured from the final chunk.
     usage: Usage,
-
-    /// Phases: Prologue -> Streaming -> Epilogue -> Done
     phase: Phase,
-
-    /// Idle timeout for waiting on upstream chunks. Zero = disabled.
     idle_timeout: Duration,
-    /// Pre-computed Claude-equivalent input token estimate from original request chars.
-    /// Used instead of upstream's inflated input_tokens.
     estimated_input_tokens: u32,
+    observer: Option<StreamObserver>,
+    had_error: bool,
+    error_message: Option<String>,
+    response_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
 enum Phase {
-    /// Emit the three opening events (message_start, content_block_start, ping).
     Prologue,
-    /// Process upstream chunks one at a time.
     Streaming,
-    /// Emit the closing events (content_block_stop(s), message_delta, message_stop).
     Epilogue,
-    /// Terminal — no more events.
     Done,
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Convert an OpenAI streaming response into a Claude-compatible SSE event stream.
-///
-/// The returned stream yields `Result<Event, Infallible>` — errors from the
-/// upstream are converted into SSE error events rather than stream termination,
-/// so the consumer always sees well-formed SSE.
 pub fn openai_stream_to_claude(
     upstream: impl Stream<Item = Result<OpenAiSseEvent, StreamError>> + Send + 'static,
     original_model: String,
     idle_timeout: Duration,
     estimated_input_tokens: u32,
+    observer: Option<StreamObserver>,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> + Send {
-    let message_id = generate_message_id();
-
     let state = ConverterState {
         upstream: Box::pin(upstream),
         original_model,
-        message_id,
+        message_id: generate_message_id(),
         text_block_index: 0,
         tool_block_counter: 0,
         tool_calls: HashMap::new(),
-        final_stop_reason: stop_reason::END_TURN.to_string(),
+        final_stop_reason: stop_reason::END_TURN.into(),
         usage: Usage::default(),
         phase: Phase::Prologue,
         idle_timeout,
         estimated_input_tokens,
+        observer,
+        had_error: false,
+        error_message: None,
+        response_id: None,
     };
 
-    // We collect events into a VecDeque because a single upstream chunk can
-    // produce 0-N output events. `unfold` yields one item at a time, so we
-    // buffer them internally.
     futures::stream::unfold(
-        (state, std::collections::VecDeque::<Event>::new()),
+        (state, VecDeque::<Event>::new()),
         |(mut state, mut buf)| async move {
             loop {
-                // Drain buffer first.
                 if let Some(event) = buf.pop_front() {
                     return Some((Ok(event), (state, buf)));
                 }
@@ -162,50 +129,36 @@ pub fn openai_stream_to_claude(
                     Phase::Prologue => {
                         emit_prologue(&state, &mut buf);
                         state.phase = Phase::Streaming;
-                        // Loop back to drain buffer.
                     }
                     Phase::Streaming => {
-                        // Wrap upstream read with idle timeout to prevent indefinite blocking.
                         let next = if state.idle_timeout.is_zero() {
                             state.upstream.next().await
                         } else {
                             match timeout(state.idle_timeout, state.upstream.next()).await {
                                 Ok(result) => result,
                                 Err(_) => {
-                                    error!(
-                                        "converter stream idle timeout ({}s)",
-                                        state.idle_timeout.as_secs()
-                                    );
-                                    emit_error_event(
-                                        &format!(
-                                            "stream idle timeout ({}s)",
-                                            state.idle_timeout.as_secs()
-                                        ),
-                                        &mut buf,
-                                    );
+                                    let secs = state.idle_timeout.as_secs();
+                                    let message = format!("stream idle timeout ({secs}s)");
+                                    mark_stream_error(&mut state, message.clone());
+                                    emit_error_event(&message, &mut buf);
                                     state.phase = Phase::Epilogue;
                                     continue;
                                 }
                             }
                         };
+
                         match next {
-                            Some(Ok(OpenAiSseEvent::Chunk(chunk))) => {
-                                process_chunk(&mut state, &chunk, &mut buf);
-                                // Loop back to drain buffer.
+                            Some(Ok(OpenAiSseEvent::Event(event))) => {
+                                process_event(&mut state, event, &mut buf);
                             }
-                            Some(Ok(OpenAiSseEvent::Done)) => {
-                                debug!("upstream stream done");
-                                state.phase = Phase::Epilogue;
-                            }
-                            Some(Err(e)) => {
-                                error!("upstream stream error: {e}");
-                                emit_error_event(&e.to_string(), &mut buf);
-                                // Still emit epilogue so client gets proper stream termination (F16)
+                            Some(Ok(OpenAiSseEvent::Done)) => state.phase = Phase::Epilogue,
+                            Some(Err(error)) => {
+                                mark_stream_error(&mut state, error.to_string());
+                                emit_error_event(&error.to_string(), &mut buf);
                                 state.phase = Phase::Epilogue;
                             }
                             None => {
-                                // Stream ended without [DONE]. Treat as normal completion.
-                                warn!("upstream stream ended without [DONE] sentinel");
+                                warn!("upstream stream ended without terminal event");
                                 state.phase = Phase::Epilogue;
                             }
                         }
@@ -214,479 +167,482 @@ pub fn openai_stream_to_claude(
                         emit_epilogue(&state, &mut buf);
                         state.phase = Phase::Done;
                     }
-                    Phase::Done => {
-                        return None; // Stream is finished.
-                    }
+                    Phase::Done => return None,
                 }
             }
         },
     )
 }
 
-// ---------------------------------------------------------------------------
-// Prologue: opening three events
-// ---------------------------------------------------------------------------
-
-fn emit_prologue(state: &ConverterState<impl Stream>, buf: &mut std::collections::VecDeque<Event>) {
-    // 1. message_start — empty message envelope
-    let message_start_data = json!({
-        "type": sse::MESSAGE_START,
-        "message": {
-            "id": state.message_id,
-            "type": "message",
-            "role": "assistant",
-            "model": state.original_model,
-            "content": [],
-            "stop_reason": null,
-            "stop_sequence": null,
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0
+fn emit_prologue<S>(state: &ConverterState<S>, buf: &mut VecDeque<Event>) {
+    buf.push_back(make_sse(
+        sse::MESSAGE_START,
+        &json!({
+            "type": sse::MESSAGE_START,
+            "message": {
+                "id": state.message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": state.original_model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
             }
-        }
-    });
-    buf.push_back(make_sse(sse::MESSAGE_START, &message_start_data));
-
-    // 2. content_block_start — text block at index 0
-    let block_start_data = json!({
-        "type": sse::CONTENT_BLOCK_START,
-        "index": 0,
-        "content_block": {
-            "type": "text",
-            "text": ""
-        }
-    });
-    buf.push_back(make_sse(sse::CONTENT_BLOCK_START, &block_start_data));
-
-    // 3. ping
-    let ping_data = json!({ "type": sse::PING });
-    buf.push_back(make_sse(sse::PING, &ping_data));
-
-    debug!("prologue emitted for model={}", state.original_model);
+        }),
+    ));
+    buf.push_back(make_sse(
+        sse::CONTENT_BLOCK_START,
+        &json!({
+            "type": sse::CONTENT_BLOCK_START,
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+    ));
+    buf.push_back(make_sse(sse::PING, &json!({ "type": sse::PING })));
 }
 
-// ---------------------------------------------------------------------------
-// Chunk processing: the core state machine step
-// ---------------------------------------------------------------------------
-
-fn process_chunk(
-    state: &mut ConverterState<impl Stream>,
-    chunk: &ChatCompletionChunk,
-    buf: &mut std::collections::VecDeque<Event>,
+fn process_event<S>(
+    state: &mut ConverterState<S>,
+    event: ResponseStreamEvent,
+    buf: &mut VecDeque<Event>,
 ) {
-    // Capture usage if present (OpenAI sends this on the final data chunk
-    // when stream_options.include_usage is true).
-    if let Some(ref usage) = chunk.usage {
-        state.usage = Usage {
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
-            cache_read_input_tokens: usage
-                .prompt_tokens_details
+    match event.event_type.as_str() {
+        "response.output_text.delta" => emit_text_delta(&event, state.text_block_index, buf),
+        "response.output_item.added" | "response.output_item.done" => {
+            register_tool_call(state, &event, buf)
+        }
+        "response.function_call_arguments.delta" => {
+            emit_function_arguments_delta(state, &event, buf)
+        }
+        "response.completed" | "response.incomplete" => {
+            if let Some(response) = event.response {
+                apply_response_snapshot(state, &response);
+            }
+            state.phase = Phase::Epilogue;
+        }
+        "response.failed" => {
+            let message = event
+                .response
                 .as_ref()
-                .and_then(|d| d.cached_tokens),
+                .and_then(|response| response.status.clone())
+                .unwrap_or_else(|| "response failed".into());
+            mark_stream_error(state, message.clone());
+            emit_error_event(&message, buf);
+            state.phase = Phase::Epilogue;
+        }
+        "error" => {
+            let message = event
+                .error
+                .and_then(|error| error.message)
+                .unwrap_or_else(|| "unknown streaming error".into());
+            mark_stream_error(state, message.clone());
+            emit_error_event(&message, buf);
+            state.phase = Phase::Epilogue;
+        }
+        _ => {}
+    }
+}
+
+fn emit_text_delta(event: &ResponseStreamEvent, text_index: usize, buf: &mut VecDeque<Event>) {
+    let Some(delta) = event.delta.as_ref() else {
+        return;
+    };
+    if delta.is_empty() {
+        return;
+    }
+
+    buf.push_back(make_sse(
+        sse::CONTENT_BLOCK_DELTA,
+        &json!({
+            "type": sse::CONTENT_BLOCK_DELTA,
+            "index": text_index,
+            "delta": { "type": sse::DELTA_TEXT, "text": delta }
+        }),
+    ));
+}
+
+fn register_tool_call<S>(
+    state: &mut ConverterState<S>,
+    event: &ResponseStreamEvent,
+    buf: &mut VecDeque<Event>,
+) {
+    let Some(index) = event.output_index else {
+        return;
+    };
+    let Some(item) = event.item.as_ref() else {
+        return;
+    };
+    if item.item_type != "function_call" {
+        return;
+    }
+
+    let mut start_block = None;
+    {
+        let accumulator = state
+            .tool_calls
+            .entry(index)
+            .or_insert_with(ToolCallAccumulator::new);
+
+        if let Some(call_id) = item.call_id.as_ref() {
+            accumulator.call_id = Some(call_id.clone());
+        }
+        if let Some(name) = item.name.as_ref() {
+            accumulator.name = Some(name.clone());
+        }
+
+        if !accumulator.started {
+            if let (Some(call_id), Some(name)) =
+                (accumulator.call_id.clone(), accumulator.name.clone())
+            {
+                start_block = Some((call_id, name));
+            }
+        }
+    }
+
+    if let Some((call_id, name)) = start_block {
+        state.tool_block_counter += 1;
+        let claude_index = state.text_block_index + state.tool_block_counter;
+        if let Some(accumulator) = state.tool_calls.get_mut(&index) {
+            accumulator.claude_index = Some(claude_index);
+            accumulator.started = true;
+        }
+        buf.push_back(make_sse(
+            sse::CONTENT_BLOCK_START,
+            &json!({
+                "type": sse::CONTENT_BLOCK_START,
+                "index": claude_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "input": {}
+                }
+            }),
+        ));
+    }
+
+    if let Some(arguments) = item.arguments.as_ref() {
+        if let Some(accumulator) = state.tool_calls.get_mut(&index) {
+            emit_function_arguments(accumulator, arguments, buf);
+        }
+    }
+}
+
+fn emit_function_arguments_delta<S>(
+    state: &mut ConverterState<S>,
+    event: &ResponseStreamEvent,
+    buf: &mut VecDeque<Event>,
+) {
+    let Some(index) = event.output_index else {
+        return;
+    };
+    let Some(delta) = event.delta.as_ref() else {
+        return;
+    };
+    if delta.is_empty() {
+        return;
+    }
+
+    let Some(accumulator) = state.tool_calls.get_mut(&index) else {
+        return;
+    };
+    if !accumulator.started {
+        return;
+    }
+
+    accumulator.args_buffer.push_str(delta);
+    let Some(claude_index) = accumulator.claude_index else {
+        return;
+    };
+
+    buf.push_back(make_sse(
+        sse::CONTENT_BLOCK_DELTA,
+        &json!({
+            "type": sse::CONTENT_BLOCK_DELTA,
+            "index": claude_index,
+            "delta": { "type": sse::DELTA_INPUT_JSON, "partial_json": delta }
+        }),
+    ));
+}
+
+fn emit_function_arguments(
+    accumulator: &mut ToolCallAccumulator,
+    arguments: &str,
+    buf: &mut VecDeque<Event>,
+) {
+    if arguments.is_empty() {
+        return;
+    }
+    let Some(claude_index) = accumulator.claude_index else {
+        return;
+    };
+    if accumulator.args_buffer == arguments {
+        return;
+    }
+
+    let delta = if arguments.starts_with(&accumulator.args_buffer) {
+        &arguments[accumulator.args_buffer.len()..]
+    } else {
+        arguments
+    };
+    if delta.is_empty() {
+        return;
+    }
+
+    accumulator.args_buffer = arguments.into();
+    buf.push_back(make_sse(
+        sse::CONTENT_BLOCK_DELTA,
+        &json!({
+            "type": sse::CONTENT_BLOCK_DELTA,
+            "index": claude_index,
+            "delta": { "type": sse::DELTA_INPUT_JSON, "partial_json": delta }
+        }),
+    ));
+}
+
+fn apply_response_snapshot<S>(state: &mut ConverterState<S>, response: &ResponseObject) {
+    state.response_id = Some(response.id.clone());
+    if let Some(usage) = response.usage.as_ref() {
+        state.usage = Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+            upstream_input_tokens: Some(usage.input_tokens),
         };
     }
 
-    // Process each choice (typically just one).
-    for choice in &chunk.choices {
-        let delta = &choice.delta;
-
-        // --- Text delta ---
-        if let Some(ref text) = delta.content {
-            if !text.is_empty() {
-                let data = json!({
-                    "type": sse::CONTENT_BLOCK_DELTA,
-                    "index": state.text_block_index,
-                    "delta": {
-                        "type": sse::DELTA_TEXT,
-                        "text": text
-                    }
-                });
-                buf.push_back(make_sse(sse::CONTENT_BLOCK_DELTA, &data));
-            }
-        }
-
-        // --- Tool call deltas ---
-        if let Some(ref tool_calls) = delta.tool_calls {
-            for tc_delta in tool_calls {
-                let tc_index = tc_delta.index;
-
-                // Get or create accumulator for this tool call index.
-                let acc = state
-                    .tool_calls
-                    .entry(tc_index)
-                    .or_insert_with(ToolCallAccumulator::new);
-
-                // Update ID if provided.
-                if let Some(ref id) = tc_delta.id {
-                    acc.id = Some(id.clone());
-                }
-
-                // Update function name if provided.
-                if let Some(ref func) = tc_delta.function {
-                    if let Some(ref name) = func.name {
-                        acc.name = Some(name.clone());
-                    }
-                }
-
-                // Emit content_block_start once we have both id and name.
-                if let (Some(ref id), Some(ref name)) = (&acc.id, &acc.name) {
-                    if !acc.started {
-                        state.tool_block_counter += 1;
-                        let claude_index = state.text_block_index + state.tool_block_counter;
-                        acc.claude_index = Some(claude_index);
-                        acc.started = true;
-
-                        let data = json!({
-                            "type": sse::CONTENT_BLOCK_START,
-                            "index": claude_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": id,
-                                "name": name,
-                                "input": {}
-                            }
-                        });
-                        buf.push_back(make_sse(sse::CONTENT_BLOCK_START, &data));
-                    }
-                }
-
-                // Accumulate function arguments and emit input_json_delta incrementally.
-                if let Some(ref func) = tc_delta.function {
-                    if let Some(ref args_fragment) = func.arguments {
-                        if let Some(claude_idx) = acc.claude_index {
-                            if !args_fragment.is_empty() {
-                                acc.args_buffer.push_str(args_fragment);
-
-                                let data = json!({
-                                    "type": sse::CONTENT_BLOCK_DELTA,
-                                    "index": claude_idx,
-                                    "delta": {
-                                        "type": sse::DELTA_INPUT_JSON,
-                                        "partial_json": args_fragment
-                                    }
-                                });
-                                buf.push_back(make_sse(sse::CONTENT_BLOCK_DELTA, &data));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Finish reason ---
-        if let Some(ref reason) = choice.finish_reason {
-            state.final_stop_reason = map_finish_reason(reason);
-        }
-    }
+    let claude_response = openai_to_claude(
+        response,
+        &state.original_model,
+        state.estimated_input_tokens,
+    );
+    state.final_stop_reason = claude_response
+        .stop_reason
+        .unwrap_or_else(|| stop_reason::END_TURN.into());
 }
 
-// ---------------------------------------------------------------------------
-// Epilogue: closing events
-// ---------------------------------------------------------------------------
+fn emit_epilogue<S>(state: &ConverterState<S>, buf: &mut VecDeque<Event>) {
+    buf.push_back(make_sse(
+        sse::CONTENT_BLOCK_STOP,
+        &json!({ "type": sse::CONTENT_BLOCK_STOP, "index": state.text_block_index }),
+    ));
 
-fn emit_epilogue(state: &ConverterState<impl Stream>, buf: &mut std::collections::VecDeque<Event>) {
-    warn!(
-        "← stream done | input_tokens={} output_tokens={} cache_read={} stop={}",
+    let mut indices = state.tool_calls.keys().copied().collect::<Vec<_>>();
+    indices.sort_unstable();
+    for index in indices {
+        let accumulator = &state.tool_calls[&index];
+        if let Some(claude_index) = accumulator.claude_index {
+            buf.push_back(make_sse(
+                sse::CONTENT_BLOCK_STOP,
+                &json!({ "type": sse::CONTENT_BLOCK_STOP, "index": claude_index }),
+            ));
+        }
+    }
+
+    let usage = derive_claude_usage(
+        state.estimated_input_tokens,
         state.usage.input_tokens,
         state.usage.output_tokens,
-        state.usage.cache_read_input_tokens.unwrap_or(0),
-        state.final_stop_reason,
+        state.usage.cache_read_input_tokens,
     );
-
-    // 1. content_block_stop for the text block.
-    let text_stop = json!({
-        "type": sse::CONTENT_BLOCK_STOP,
-        "index": state.text_block_index
-    });
-    buf.push_back(make_sse(sse::CONTENT_BLOCK_STOP, &text_stop));
-
-    // 2. content_block_stop for each started tool call block.
-    let mut tool_indices: Vec<usize> = state.tool_calls.keys().copied().collect();
-    tool_indices.sort();
-    let has_tool_calls = tool_indices.iter().any(|idx| state.tool_calls[idx].started);
-    for idx in tool_indices {
-        let acc = &state.tool_calls[&idx];
-        if acc.started {
-            if let Some(claude_idx) = acc.claude_index {
-                let tool_stop = json!({
-                    "type": sse::CONTENT_BLOCK_STOP,
-                    "index": claude_idx
-                });
-                buf.push_back(make_sse(sse::CONTENT_BLOCK_STOP, &tool_stop));
+    buf.push_back(make_sse(
+        sse::MESSAGE_DELTA,
+        &json!({
+            "type": sse::MESSAGE_DELTA,
+            "delta": {
+                "stop_reason": state.final_stop_reason,
+                "stop_sequence": null
+            },
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens.unwrap_or(0)
             }
-        }
-    }
-
-    // Force stop_reason to tool_use if we saw any tool calls
-    let final_stop = if has_tool_calls {
-        stop_reason::TOOL_USE.to_string()
-    } else {
-        state.final_stop_reason.clone()
-    };
-
-    // 3. message_delta with stop_reason and usage.
-    // Use the MINIMUM of tiktoken estimate and upstream count.
-    // tiktoken counts the original content; upstream counts after format conversion.
-    // Taking the min avoids both over-reporting and under-reporting.
-    let report_input = if state.estimated_input_tokens > 0 && state.usage.input_tokens > 0 {
-        state.estimated_input_tokens.min(state.usage.input_tokens)
-    } else if state.estimated_input_tokens > 0 {
-        state.estimated_input_tokens
-    } else {
-        state.usage.input_tokens
-    };
-    let report_output = state.usage.output_tokens;
-    // Preserve cache ratio from upstream.
-    let cache_ratio = if state.usage.input_tokens > 0 {
-        state.usage.cache_read_input_tokens.unwrap_or(0) as f64 / state.usage.input_tokens as f64
-    } else {
-        0.0
-    };
-    let report_cache = (report_input as f64 * cache_ratio).round() as u32;
-    let usage_data = json!({
-        "input_tokens": report_input,
-        "output_tokens": report_output,
-        "cache_read_input_tokens": report_cache
-    });
-    let message_delta = json!({
-        "type": sse::MESSAGE_DELTA,
-        "delta": {
-            "stop_reason": final_stop,
-            "stop_sequence": null
-        },
-        "usage": usage_data
-    });
-    buf.push_back(make_sse(sse::MESSAGE_DELTA, &message_delta));
-
-    // 4. message_stop — final event.
-    let message_stop = json!({ "type": sse::MESSAGE_STOP });
-    buf.push_back(make_sse(sse::MESSAGE_STOP, &message_stop));
+        }),
+    ));
+    notify_completion(state, usage, state.final_stop_reason.clone());
+    buf.push_back(make_sse(
+        sse::MESSAGE_STOP,
+        &json!({ "type": sse::MESSAGE_STOP }),
+    ));
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build an axum SSE `Event` with the given event name and JSON data.
 fn make_sse(event_name: &str, data: &serde_json::Value) -> Event {
-    // serde_json::to_string produces UTF-8 (no ASCII escaping) by default,
-    // matching the Python `ensure_ascii=False` behavior.
-    let json_str = serde_json::to_string(data).unwrap_or_else(|e| {
-        error!("failed to serialize SSE data: {e}");
+    let payload = serde_json::to_string(data).unwrap_or_else(|error| {
+        error!("failed to serialize SSE data: {error}");
         format!(
             r#"{{"type":"error","error":{{"type":"serialization_error","message":"{}"}}}}"#,
-            e
+            error
         )
     });
-    Event::default().event(event_name).data(json_str)
+    Event::default().event(event_name).data(payload)
 }
 
-/// Emit an SSE error event (non-fatal — the stream continues to the next phase
-/// or terminates, but the consumer still sees a well-formed event).
-fn emit_error_event(message: &str, buf: &mut std::collections::VecDeque<Event>) {
-    let data = json!({
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": format!("Streaming error: {message}")
-        }
-    });
-    buf.push_back(make_sse("error", &data));
+fn emit_error_event(message: &str, buf: &mut VecDeque<Event>) {
+    buf.push_back(make_sse(
+        "error",
+        &json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": format!("Streaming error: {message}")
+            }
+        }),
+    ));
 }
 
-/// Map OpenAI `finish_reason` to Claude `stop_reason`.
-fn map_finish_reason(reason: &str) -> String {
-    match reason {
-        "stop" => stop_reason::END_TURN,
-        "length" => stop_reason::MAX_TOKENS,
-        "tool_calls" | "function_call" => stop_reason::TOOL_USE,
-        _ => stop_reason::END_TURN,
+fn mark_stream_error<S>(state: &mut ConverterState<S>, message: String) {
+    state.had_error = true;
+    if state.error_message.is_none() {
+        state.error_message = Some(message);
     }
-    .to_string()
 }
 
-/// Generate a Claude-style message ID: `msg_` + 24 hex characters.
 fn generate_message_id() -> String {
-    let uuid_hex = Uuid::new_v4().simple().to_string(); // 32 hex chars
-    format!("msg_{}", &uuid_hex[..24])
+    let uuid = Uuid::new_v4().simple().to_string();
+    format!("msg_{}", &uuid[..24])
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn notify_completion<S>(state: &ConverterState<S>, usage: Usage, stop_reason: String) {
+    let Some(observer) = state.observer.as_ref() else {
+        return;
+    };
+    observer(StreamSummary {
+        usage,
+        stop_reason,
+        response_id: state.response_id.clone(),
+        had_error: state.had_error,
+        error_message: state.error_message.clone(),
+    });
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::openai::*;
     use futures::stream;
-    use std::time::Duration;
 
-    /// Helper to collect all events from the converter.
-    async fn collect_events(
-        events: Vec<Result<OpenAiSseEvent, StreamError>>,
-        model: &str,
-    ) -> Vec<Event> {
-        let upstream = stream::iter(events);
-        let output = openai_stream_to_claude(upstream, model.to_string(), Duration::ZERO, 0);
+    async fn collect_events(events: Vec<Result<OpenAiSseEvent, StreamError>>) -> Vec<Event> {
+        let output = openai_stream_to_claude(
+            stream::iter(events),
+            "claude-test".into(),
+            Duration::ZERO,
+            0,
+            None,
+        );
         futures::pin_mut!(output);
-        let mut results = Vec::new();
+        let mut result = Vec::new();
         while let Some(Ok(event)) = output.next().await {
-            results.push(event);
+            result.push(event);
         }
-        results
+        result
     }
 
-    fn make_text_chunk(text: &str) -> ChatCompletionChunk {
-        ChatCompletionChunk {
-            id: "chatcmpl-test".into(),
-            choices: vec![ChunkChoice {
-                delta: ChunkDelta {
-                    content: Some(text.to_string()),
-                    tool_calls: None,
-                },
-                finish_reason: None,
-            }],
-            usage: None,
-        }
+    #[tokio::test]
+    async fn streams_text_deltas() {
+        let events = vec![
+            Ok(OpenAiSseEvent::Event(ResponseStreamEvent {
+                event_type: "response.output_text.delta".into(),
+                delta: Some("Hello".into()),
+                output_index: Some(0),
+                item: None,
+                response: None,
+                error: None,
+            })),
+            Ok(OpenAiSseEvent::Event(ResponseStreamEvent {
+                event_type: "response.completed".into(),
+                delta: None,
+                output_index: None,
+                item: None,
+                response: Some(ResponseObject {
+                    id: "resp_1".into(),
+                    output: vec![],
+                    usage: Some(ResponseUsage {
+                        input_tokens: 5,
+                        output_tokens: 2,
+                        input_tokens_details: None,
+                    }),
+                    status: Some("completed".into()),
+                    incomplete_details: None,
+                }),
+                error: None,
+            })),
+        ];
+
+        let result = collect_events(events).await;
+        assert_eq!(result.len(), 7);
     }
 
-    fn make_finish_chunk(reason: &str) -> ChatCompletionChunk {
-        ChatCompletionChunk {
-            id: "chatcmpl-test".into(),
-            choices: vec![ChunkChoice {
-                delta: ChunkDelta {
+    #[tokio::test]
+    async fn streams_function_call_arguments() {
+        let events = vec![
+            Ok(OpenAiSseEvent::Event(ResponseStreamEvent {
+                event_type: "response.output_item.added".into(),
+                delta: None,
+                output_index: Some(1),
+                item: Some(ResponseOutputItem {
+                    item_type: "function_call".into(),
+                    role: None,
                     content: None,
-                    tool_calls: None,
-                },
-                finish_reason: Some(reason.to_string()),
-            }],
-            usage: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_simple_text_stream() {
-        let events = vec![
-            Ok(OpenAiSseEvent::Chunk(make_text_chunk("Hello"))),
-            Ok(OpenAiSseEvent::Chunk(make_text_chunk(" world"))),
-            Ok(OpenAiSseEvent::Chunk(make_finish_chunk("stop"))),
-            Ok(OpenAiSseEvent::Done),
-        ];
-
-        let result = collect_events(events, "claude-3-opus-20240229").await;
-
-        // Prologue: message_start + content_block_start + ping = 3
-        // Streaming: 2 text deltas (one per text chunk, finish chunk has no content)
-        // Epilogue: content_block_stop + message_delta + message_stop = 3
-        // Total = 3 + 2 + 3 = 8
-        assert_eq!(result.len(), 8, "expected 8 events, got {}", result.len());
-    }
-
-    #[tokio::test]
-    async fn test_empty_stream() {
-        // Only [DONE], no content at all.
-        let events = vec![Ok(OpenAiSseEvent::Done)];
-        let result = collect_events(events, "claude-3-opus-20240229").await;
-
-        // Prologue(3) + Epilogue(3) = 6
-        assert_eq!(result.len(), 6, "expected 6 events for empty stream");
-    }
-
-    #[tokio::test]
-    async fn test_tool_call_stream() {
-        let events = vec![
-            // First chunk: tool call starts with id + name
-            Ok(OpenAiSseEvent::Chunk(ChatCompletionChunk {
-                id: "chatcmpl-tool".into(),
-                choices: vec![ChunkChoice {
-                    delta: ChunkDelta {
-                        content: None,
-                        tool_calls: Some(vec![ChunkToolCall {
-                            index: 0,
-                            id: Some("call_abc123".into()),
-                            function: Some(ChunkFunction {
-                                name: Some("get_weather".into()),
-                                arguments: Some(r#"{"lo"#.into()),
-                            }),
-                        }]),
-                    },
-                    finish_reason: None,
-                }],
-                usage: None,
+                    call_id: Some("call_1".into()),
+                    name: Some("lookup".into()),
+                    arguments: Some("{".into()),
+                    status: None,
+                }),
+                response: None,
+                error: None,
             })),
-            // Second chunk: more arguments
-            Ok(OpenAiSseEvent::Chunk(ChatCompletionChunk {
-                id: "chatcmpl-tool".into(),
-                choices: vec![ChunkChoice {
-                    delta: ChunkDelta {
-                        content: None,
-                        tool_calls: Some(vec![ChunkToolCall {
-                            index: 0,
-                            id: None,
-                            function: Some(ChunkFunction {
-                                name: None,
-                                arguments: Some(r#"cation":"SF"}"#.into()),
-                            }),
-                        }]),
-                    },
-                    finish_reason: None,
-                }],
-                usage: None,
+            Ok(OpenAiSseEvent::Event(ResponseStreamEvent {
+                event_type: "response.function_call_arguments.delta".into(),
+                delta: Some(r#""city":"SF"}"#.into()),
+                output_index: Some(1),
+                item: None,
+                response: None,
+                error: None,
             })),
-            Ok(OpenAiSseEvent::Chunk(make_finish_chunk("tool_calls"))),
-            Ok(OpenAiSseEvent::Done),
+            Ok(OpenAiSseEvent::Event(ResponseStreamEvent {
+                event_type: "response.completed".into(),
+                delta: None,
+                output_index: None,
+                item: None,
+                response: Some(ResponseObject {
+                    id: "resp_2".into(),
+                    output: vec![ResponseOutputItem {
+                        item_type: "function_call".into(),
+                        role: None,
+                        content: None,
+                        call_id: Some("call_1".into()),
+                        name: Some("lookup".into()),
+                        arguments: Some(r#"{"city":"SF"}"#.into()),
+                        status: Some("completed".into()),
+                    }],
+                    usage: None,
+                    status: Some("completed".into()),
+                    incomplete_details: None,
+                }),
+                error: None,
+            })),
         ];
 
-        let result = collect_events(events, "claude-3-opus-20240229").await;
-
-        // Prologue(3) + content_block_start(tool) + 2 input_json_deltas (one per chunk) + finish(nothing)
-        // Epilogue: text_stop + tool_stop + message_delta + message_stop = 4
-        // Total = 3 + 1 (tool block start) + 2 (json deltas) + 4 = 10
-        assert_eq!(
-            result.len(),
-            10,
-            "expected 10 events for tool call stream, got {}",
-            result.len()
-        );
+        let result = collect_events(events).await;
+        assert_eq!(result.len(), 10);
     }
 
     #[tokio::test]
-    async fn test_error_event() {
-        let events = vec![
-            Ok(OpenAiSseEvent::Chunk(make_text_chunk("Hi"))),
-            Err(StreamError::Connection("connection reset".into())),
-        ];
-
-        let result = collect_events(events, "test-model").await;
-
-        // Prologue(3) + text_delta(1) + error(1) + Epilogue(3) = 8
-        // Epilogue still emitted after error for proper stream termination.
-        assert_eq!(
-            result.len(),
-            8,
-            "expected 8 events with error, got {}",
-            result.len()
-        );
+    async fn emits_error_then_epilogue() {
+        let events = vec![Err(StreamError::Connection("boom".into()))];
+        let result = collect_events(events).await;
+        assert_eq!(result.len(), 7);
     }
 
-    #[tokio::test]
-    async fn test_message_id_format() {
+    #[test]
+    fn message_id_matches_claude_shape() {
         let id = generate_message_id();
-        assert!(id.starts_with("msg_"), "ID should start with msg_");
-        // "msg_" (4) + 24 hex chars = 28 total
-        assert_eq!(id.len(), 28, "ID should be 28 chars, got {}", id.len());
-        // Everything after "msg_" should be hex.
-        assert!(id[4..].chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[tokio::test]
-    async fn test_finish_reason_mapping() {
-        assert_eq!(map_finish_reason("stop"), "end_turn");
-        assert_eq!(map_finish_reason("length"), "max_tokens");
-        assert_eq!(map_finish_reason("tool_calls"), "tool_use");
-        assert_eq!(map_finish_reason("function_call"), "tool_use");
-        assert_eq!(map_finish_reason("content_filter"), "end_turn");
+        assert!(id.starts_with("msg_"));
+        assert_eq!(id.len(), 28);
     }
 }

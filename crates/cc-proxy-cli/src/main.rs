@@ -31,6 +31,8 @@ enum Commands {
     Setup,
     /// Test upstream API connection
     Test,
+    /// Interactive menu
+    Menu,
 }
 
 #[tokio::main]
@@ -53,9 +55,10 @@ async fn main() -> anyhow::Result<()> {
                 Commands::Status => commands::status::run().await?,
                 Commands::Setup => commands::setup::run().await?,
                 Commands::Test => commands::test::run().await?,
+                Commands::Menu => interactive_menu().await?,
             }
         }
-        None => interactive_menu().await?,
+        None => launch().await?,
     }
 
     Ok(())
@@ -68,6 +71,69 @@ fn init_tracing() {
                 .unwrap_or_else(|_| "info,hyper=warn,reqwest=warn".into()),
         )
         .init();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  One-click Launch
+// ═══════════════════════════════════════════════════════════════════
+
+async fn launch() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+    init_tracing();
+    print_banner();
+
+    // 未配置则进入配置向导
+    if !config_file_exists() {
+        println!("  {}", style("⚠ 尚未配置，进入配置向导...").yellow());
+        println!();
+        commands::setup::run().await?;
+    }
+
+    // 检查代理是否已在运行
+    let already_running = check_proxy_running().await;
+    if already_running {
+        println!(
+            "  {} 代理已在运行中",
+            style("✔").green().bold()
+        );
+    } else {
+        // 启动后台代理
+        daemon::start_daemon()?;
+    }
+
+    // 自动接入 Claude Code
+    auto_connect_claude_code();
+
+    // 打开 Dashboard
+    let port = get_config_port();
+    let dashboard_url = format!("http://127.0.0.1:{}/dashboard", port);
+    println!();
+    println!(
+        "  {} 正在打开 Dashboard: {}",
+        style("🌐").cyan(),
+        style(&dashboard_url).green().underlined()
+    );
+    let _ = open_browser(&dashboard_url);
+
+    Ok(())
+}
+
+fn open_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    }
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════

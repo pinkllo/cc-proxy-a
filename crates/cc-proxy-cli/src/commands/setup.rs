@@ -134,6 +134,8 @@ pub async fn run() -> Result<()> {
         } else {
             Some(small_reasoning)
         },
+        prompt_cache_retention: None,
+        model_pricing: HashMap::new(),
     };
 
     // Save

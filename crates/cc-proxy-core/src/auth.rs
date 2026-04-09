@@ -1,13 +1,23 @@
-use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response, Extension};
+use std::sync::Arc;
+
+use axum::{
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::Next,
+    response::Response,
+};
 use serde_json::json;
 
+use crate::server::AppState;
+
 /// Middleware: validate client API key if ANTHROPIC_API_KEY is configured.
-/// The expected key is injected via Extension<Option<String>>.
 pub async fn auth_middleware(
-    Extension(expected_key): Extension<Option<String>>,
+    State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
+    let expected_key = state.runtime.current_auth_key();
+
     // If no expected key configured, skip validation
     let Some(ref expected) = expected_key else {
         return Ok(next.run(request).await);
